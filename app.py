@@ -2,6 +2,7 @@
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify
+from flask_cors import CORS
 
 load_dotenv()
 
@@ -24,6 +25,17 @@ def create_app(services: dict | None = None) -> Flask:
     """Construye la aplicacion; ``services`` permite pruebas sin Firebase real."""
     app = Flask(__name__)
     app.extensions["services"] = services or _build_services()
+
+    CORS(
+        app,
+        resources={
+            r"/*": {
+                "origins": [
+                    "http://localhost:5173"
+                ]
+            }
+        }
+    )
 
     @app.get("/health")
     def health():
