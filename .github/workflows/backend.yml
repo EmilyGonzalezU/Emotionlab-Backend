@@ -22,12 +22,18 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
+      - name: Mostrar estructura
+        run: |
+          pwd
+          ls -la
+          find . -maxdepth 2
       - name: Instalar dependencias
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-
+      - name: Mostrar PYTHONPATH
+        run: |
+          python -c "import os,sys; print(os.getcwd()); print(); print(sys.path)"
       - name: Ejecutar pruebas
         env:
           PYTHONPATH: ${{ github.workspace }}
