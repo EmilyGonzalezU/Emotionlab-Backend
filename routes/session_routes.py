@@ -82,6 +82,8 @@ def _session_summary(session):
     prediction = session.get("prediction") or {}
     return {
         "session_id": session.get("session_id"),
+        "created_at": session.get("created_at"),
+        "updated_at": session.get("updated_at"),
         "hora": session.get("hora"),
         "edad": session.get("edad"),
         "genero": session.get("genero"),
