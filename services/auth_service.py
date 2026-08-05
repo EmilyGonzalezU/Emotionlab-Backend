@@ -90,7 +90,8 @@ class AuthService:
 
     def get_current_user(self, token: str) -> dict:
         """Obtiene el usuario activo asociado al JWT verificado."""
-        uid = self.verify_token(token).get("sub")
+        claims = self.verify_token(token)
+        uid = claims.get("sub")
         if not uid:
             raise AuthenticationError("El token no contiene el identificador de usuario")
 
@@ -99,10 +100,19 @@ class AuthService:
             raise UserNotFound("El usuario del token no existe")
         if not user.get("activo", False):
             raise AuthenticationError("El usuario esta inactivo")
-        return self._public_user(user)
+        public_user = self._public_user(user)
+        public_user["uid"] = uid
+        return public_user
 
     @staticmethod
     def _public_user(user: dict) -> dict:
         """Elimina credenciales antes de incluir al usuario en una respuesta."""
+        public_user = dict(user)
+        if not public_user.get("uid") and public_user.get("id"):
+            public_user["uid"] = public_user["id"]
         private_fields = {"password", "password_hash"}
-        return {key: value for key, value in user.items() if key not in private_fields}
+        return {
+            key: value
+            for key, value in public_user.items()
+            if key not in private_fields
+        }

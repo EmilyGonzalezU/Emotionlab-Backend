@@ -15,6 +15,7 @@ class FakeUserService:
     def __init__(self, user):
         self.user = user
         self.last_login_uid = None
+        self.logged_activity = []
 
     def get_by_email(self, email):
         if self.user and self.user["email"] == email.lower():
@@ -24,8 +25,24 @@ class FakeUserService:
     def update_last_login(self, uid):
         self.last_login_uid = uid
 
+    def log_activity(self, actor_uid, action, target_uid=None, details=None):
+        self.logged_activity.append(
+            {
+                "actor_uid": actor_uid,
+                "action": action,
+                "target_uid": target_uid,
+                "details": details,
+            }
+        )
+
     def get_user(self, uid):
-        if self.user and self.user["uid"] == uid:
+        user_uid = self.user.get("uid") if self.user else None
+        user_id = self.user.get("id") if self.user else None
+        if self.user and (
+            user_uid == uid
+            or user_id == uid
+            or (user_uid is None and user_id is None)
+        ):
             return self.user.copy()
         return None
 
@@ -76,4 +93,23 @@ class AuthServiceTests(unittest.TestCase):
         token = service.login("admin@emotionlab.test", "ClaveSegura123!")["token"]
 
         self.assertEqual(service.verify_token(token)["sub"], "admin-1")
+        self.assertEqual(service.get_current_user(token)["uid"], "admin-1")
+
+    def test_get_current_user_normalizes_legacy_id_field(self):
+        legacy_user = self.user.copy()
+        legacy_user.pop("uid")
+        legacy_user["id"] = "legacy-admin-1"
+        service = self._service(legacy_user)
+
+        token = service.generate_token(legacy_user)
+
+        self.assertEqual(service.get_current_user(token)["uid"], "legacy-admin-1")
+
+    def test_get_current_user_injects_uid_when_document_has_no_uid_or_id(self):
+        legacy_user = self.user.copy()
+        legacy_user.pop("uid")
+        service = self._service(legacy_user)
+
+        token = service.generate_token({**legacy_user, "uid": "admin-1"})
+
         self.assertEqual(service.get_current_user(token)["uid"], "admin-1")

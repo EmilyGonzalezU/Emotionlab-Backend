@@ -2,12 +2,21 @@ from uuid import uuid4
 
 from flask import Blueprint, current_app, g, jsonify, request
 
+from core.exceptions import AuthenticationError
 from core.roles import ROLE_ADMIN
 from middleware.jwt_required import jwt_required
 from middleware.roles_required import roles_required
 
 
 users_bp = Blueprint("users", __name__, url_prefix="/users")
+
+
+def _current_actor_uid() -> str:
+    current_user = getattr(g, "current_user", {})
+    actor_uid = current_user.get("uid") or current_user.get("id")
+    if not actor_uid:
+        raise AuthenticationError("El usuario autenticado no tiene un identificador valido")
+    return actor_uid
 
 
 @users_bp.get("")
@@ -36,7 +45,7 @@ def create_user():
         crypto.hash_password(body["password"]),
     )
     current_app.extensions["services"]["user_service"].log_activity(
-        g.current_user["uid"],
+        _current_actor_uid(),
         "Creación de usuario",
         target_uid=uid,
     )
@@ -61,7 +70,7 @@ def update_user(uid):
 
     current_app.extensions["services"]["user_service"].update_user(uid, body)
     current_app.extensions["services"]["user_service"].log_activity(
-        g.current_user["uid"],
+        _current_actor_uid(),
         "Actualización de usuario",
         target_uid=uid,
         details={"campos": sorted(body.keys())},
@@ -79,7 +88,7 @@ def disable_user(uid):
         return jsonify({"error": "Usuario no encontrado"}), 404
 
     service.disable_user(uid)
-    service.log_activity(g.current_user["uid"], "Cuenta deshabilitada", target_uid=uid)
+    service.log_activity(_current_actor_uid(), "Cuenta deshabilitada", target_uid=uid)
 
     return jsonify({"message": "Usuario deshabilitado correctamente"}), 200
 
@@ -93,7 +102,7 @@ def enable_user(uid):
         return jsonify({"error": "Usuario no encontrado"}), 404
 
     service.enable_user(uid)
-    service.log_activity(g.current_user["uid"], "Cuenta habilitada", target_uid=uid)
+    service.log_activity(_current_actor_uid(), "Cuenta habilitada", target_uid=uid)
 
     return jsonify({"message": "Usuario habilitado correctamente"}), 200
 
@@ -107,7 +116,7 @@ def delete_user(uid):
         return jsonify({"error": "Usuario no encontrado"}), 404
 
     service.delete_user(uid)
-    service.log_activity(g.current_user["uid"], "Cuenta eliminada", target_uid=uid)
+    service.log_activity(_current_actor_uid(), "Cuenta eliminada", target_uid=uid)
 
     return jsonify({"message": "Usuario eliminado correctamente"}), 200
 
