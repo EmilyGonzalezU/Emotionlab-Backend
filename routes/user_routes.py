@@ -1,3 +1,5 @@
+from uuid import uuid4
+
 from flask import Blueprint, current_app, g, jsonify, request
 
 from core.roles import ROLE_ADMIN
@@ -20,17 +22,23 @@ def list_users():
 @roles_required(ROLE_ADMIN)
 def create_user():
     body = request.get_json(silent=True) or {}
-    required = ("uid", "nombre", "email", "rol", "password")
+    required = ("nombre", "email", "rol", "password")
     if any(not body.get(field) for field in required):
-        return jsonify({"error": "uid, nombre, email, rol y password son obligatorios"}), 400
+        return jsonify({"error": "nombre, email, rol y password son obligatorios"}), 400
+
+    uid = str(uuid4())
     crypto = current_app.extensions["services"]["crypto_service"]
     user = current_app.extensions["services"]["user_service"].create_user(
-        body["uid"], body["nombre"], body["email"], body["rol"], crypto.hash_password(body["password"])
+        uid,
+        body["nombre"],
+        body["email"],
+        body["rol"],
+        crypto.hash_password(body["password"]),
     )
     current_app.extensions["services"]["user_service"].log_activity(
         g.current_user["uid"],
         "Creación de usuario",
-        target_uid=body["uid"],
+        target_uid=uid,
     )
     return jsonify(current_app.extensions["services"]["user_service"].public_user(user)), 201
 

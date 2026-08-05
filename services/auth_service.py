@@ -39,11 +39,11 @@ class AuthService:
         """Valida credenciales, registra el acceso y devuelve usuario y token."""
         user = self.user_service.get_by_email(email)
         if not user:
-            raise InvalidCredentials("Correo o contrasena incorrectos")
+            raise InvalidCredentials("Correo o contraseña incorrectos.")
 
         password_hash = user.get("password_hash")
         if not password_hash or not self.crypto_service.verify_password(password, password_hash):
-            raise InvalidCredentials("Correo o contrasena incorrectos")
+            raise InvalidCredentials("Correo o contraseña incorrectos.")
 
         if not user.get("activo", False):
             raise AuthenticationError("El usuario esta inactivo")
