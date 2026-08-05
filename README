@@ -1,0 +1,274 @@
+# EmotionLab Backend
+
+Backend de EmotionLab desarrollado con **Flask**, encargado de la autenticación, administración de usuarios, importación de sesiones de realidad virtual, generación de predicciones mediante un modelo de Machine Learning y comunicación con Firebase.
+
+---
+
+## Tecnologías utilizadas
+
+- Python 3.12+
+- Flask
+- Firebase Firestore
+- Firebase Storage
+- AWS S3
+- Scikit-Learn
+- Pandas
+- Passlib + bcrypt
+- JWT
+- Flask-CORS
+- OpenPyXL
+- ReportLab
+
+---
+
+## Estructura del proyecto
+
+```
+Emotionlab-Backend/
+│
+├── app.py
+├── requirements.txt
+├── .env.example
+│
+├── core/
+├── middleware/
+├── routes/
+├── services/
+├── models/
+├── utils/
+├── ia/
+├── tests/
+└── credentials/
+```
+
+---
+
+# Instalación
+
+Clonar el repositorio
+
+```bash
+git clone https://github.com/EmilyGonzalezU/Emotionlab-Backend.git
+cd Emotionlab-Backend
+```
+
+Crear entorno virtual
+
+Windows
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+```
+
+Linux / Mac
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+Instalar dependencias
+
+```bash
+pip install -r requirements.txt
+```
+
+---
+
+# Variables de entorno
+
+Crear un archivo llamado
+
+```
+.env
+```
+
+Basándose en
+
+```
+.env.example
+```
+
+Ejemplo
+
+```env
+JWT_SECRET=UnaClaveSuperSecretaDeMasDe32Caracteres
+GOOGLE_APPLICATION_CREDENTIALS=credentials/firebase.json
+```
+
+---
+
+# Ejecutar el proyecto
+
+```bash
+python app.py
+```
+
+El servidor quedará disponible en
+
+```
+http://localhost:5000
+```
+
+---
+
+# Ejecutar pruebas
+
+```bash
+pytest
+```
+
+Actualmente el proyecto cuenta con pruebas unitarias para:
+
+- API
+- Autenticación
+- Dashboard
+- Importación
+- Participantes
+- Predicción
+- Reportes
+- Parser de sesiones
+- Servicio de sesiones
+
+---
+
+# Roles
+
+## Administrador
+
+Puede:
+
+- Iniciar sesión
+- Crear visualizadores
+- Editar visualizadores
+- Eliminar visualizadores
+- Habilitar y deshabilitar visualizadores
+- Cambiar su contraseña
+- Consultar usuarios registrados
+
+No puede acceder a las sesiones clínicas.
+
+---
+
+## Visualizador
+
+Puede:
+
+- Iniciar sesión
+- Consultar dashboard
+- Consultar sesiones
+- Visualizar reportes
+- Cambiar su contraseña
+
+No puede administrar usuarios.
+
+---
+
+# Endpoints principales
+
+## Autenticación
+
+| Método | Endpoint |
+|---------|----------|
+| POST | /auth/login |
+
+---
+
+## Usuarios
+
+| Método | Endpoint |
+|---------|----------|
+| GET | /users |
+| POST | /users |
+| PUT | /users/{uid} |
+| DELETE | /users/{uid} |
+| PATCH | /users/{uid}/enable |
+| PATCH | /users/{uid}/disable |
+| GET | /users/me |
+| PATCH | /users/me/password |
+
+---
+
+## Dashboard
+
+| Método | Endpoint |
+|---------|----------|
+| GET | /dashboard |
+
+---
+
+## Sesiones
+
+| Método | Endpoint |
+|---------|----------|
+| GET | /sessions |
+| GET | /sessions/{id} |
+
+---
+
+## Importación
+
+| Método | Endpoint |
+|---------|----------|
+| POST | /import/sync |
+
+---
+
+## Reportes
+
+| Método | Endpoint |
+|---------|----------|
+| GET | /reports |
+| GET | /reports/export |
+
+---
+
+# Seguridad
+
+El backend utiliza:
+
+- JSON Web Token (JWT) para autenticación.
+- Hash de contraseñas mediante Passlib + bcrypt.
+- Control de acceso basado en roles (RBAC).
+- Variables de entorno para proteger información sensible.
+- CORS configurado para comunicación con el frontend.
+
+---
+
+# Machine Learning
+
+El sistema utiliza un modelo entrenado con Scikit-Learn para estimar el nivel de bienestar de los participantes a partir de las sesiones de realidad virtual.
+
+Modelo utilizado:
+
+```
+ia/modelo_pipeline.pkl
+```
+
+---
+
+# Integración
+
+El backend se comunica con:
+
+- Firebase Firestore
+- Firebase Storage
+- AWS S3
+- Frontend React + Electron
+
+---
+
+# Estado del proyecto
+
+Backend funcional.
+
+Incluye:
+
+- Autenticación JWT
+- CRUD de usuarios
+- Importación de sesiones
+- Predicción mediante IA
+- Reportes
+- Dashboard
+
