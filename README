@@ -1,49 +1,66 @@
-# EmotionLab Backend
+<div align="center">
 
-Backend de EmotionLab desarrollado con **Flask**, encargado de la autenticación, administración de usuarios, importación de sesiones de realidad virtual, generación de predicciones mediante un modelo de Machine Learning y comunicación con Firebase.
+# 🧠 EmotionLab Backend
 
----
+Backend del sistema **EmotionLab**, desarrollado en **Flask**, encargado de la autenticación, administración de usuarios, importación de sesiones de realidad virtual y predicción del nivel de bienestar mediante Machine Learning.
 
-## Tecnologías utilizadas
+![Python](https://img.shields.io/badge/Python-3.12-blue?logo=python)
+![Flask](https://img.shields.io/badge/Flask-3.x-black?logo=flask)
+![Firebase](https://img.shields.io/badge/Firebase-Firestore-orange?logo=firebase)
+![License](https://img.shields.io/badge/License-Academic-green)
 
-- Python 3.12+
-- Flask
-- Firebase Firestore
-- Firebase Storage
-- AWS S3
-- Scikit-Learn
-- Pandas
-- Passlib + bcrypt
-- JWT
-- Flask-CORS
-- OpenPyXL
-- ReportLab
+</div>
 
 ---
 
-## Estructura del proyecto
+# 📚 Tabla de contenidos
+
+- [Características](#-características)
+- [Arquitectura](#-arquitectura)
+- [Instalación](#-instalación)
+- [Variables de entorno](#-variables-de-entorno)
+- [Ejecución](#-ejecución)
+- [Pruebas](#-pruebas)
+- [Roles](#-roles)
+- [API](#-api)
+- [Tecnologías](#-tecnologías)
+- [Autora](#-autora)
+
+---
+
+# ✨ Características
+
+- 🔐 Autenticación mediante JWT.
+- 👥 Gestión de usuarios con control por roles.
+- 📥 Importación automática de sesiones desde AWS.
+- 🧠 Predicción del bienestar utilizando un modelo de Machine Learning.
+- 📊 Dashboard con estadísticas.
+- 📄 Generación de reportes.
+- ☁️ Integración con Firebase Firestore.
+- ✅ Pruebas unitarias con Pytest.
+
+---
+
+# 🏗 Arquitectura
 
 ```
-Emotionlab-Backend/
+Emotionlab-Backend
 │
 ├── app.py
-├── requirements.txt
-├── .env.example
-│
 ├── core/
-├── middleware/
 ├── routes/
+├── middleware/
 ├── services/
-├── models/
 ├── utils/
 ├── ia/
 ├── tests/
-└── credentials/
+├── credentials/
+└── requirements.txt
 ```
 
 ---
 
-# Instalación
+# 🚀 Instalación
 
 Clonar el repositorio
 
@@ -54,17 +71,19 @@ cd Emotionlab-Backend
 
 Crear entorno virtual
 
+```bash
+python -m venv .venv
+```
+
 Windows
 
 ```bash
-python -m venv .venv
 .venv\Scripts\activate
 ```
 
-Linux / Mac
+Linux / macOS
 
 ```bash
-python3 -m venv .venv
 source .venv/bin/activate
 ```
 
@@ -76,199 +95,96 @@ pip install -r requirements.txt
 
 ---
 
-# Variables de entorno
+# ⚙ Variables de entorno
 
-Crear un archivo llamado
-
-```
-.env
-```
-
-Basándose en
-
-```
-.env.example
-```
-
-Ejemplo
+Crear un archivo `.env`
 
 ```env
-JWT_SECRET=UnaClaveSuperSecretaDeMasDe32Caracteres
+JWT_SECRET=TuClaveSuperSecreta
 GOOGLE_APPLICATION_CREDENTIALS=credentials/firebase.json
 ```
 
 ---
 
-# Ejecutar el proyecto
+# ▶ Ejecución
 
 ```bash
 python app.py
 ```
 
-El servidor quedará disponible en
+Servidor disponible en
 
 ```
 http://localhost:5000
 ```
 
 ---
-
-# Ejecutar pruebas
-
-```bash
-pytest
-```
-
-Actualmente el proyecto cuenta con pruebas unitarias para:
-
-- API
-- Autenticación
-- Dashboard
-- Importación
-- Participantes
-- Predicción
-- Reportes
-- Parser de sesiones
-- Servicio de sesiones
-
----
-
-# Roles
+# 👤 Roles
 
 ## Administrador
 
-Puede:
-
-- Iniciar sesión
 - Crear visualizadores
 - Editar visualizadores
 - Eliminar visualizadores
-- Habilitar y deshabilitar visualizadores
-- Cambiar su contraseña
-- Consultar usuarios registrados
-
-No puede acceder a las sesiones clínicas.
+- Habilitar / Deshabilitar visualizadores
+- Cambiar contraseña
+- Consultar usuarios
 
 ---
 
 ## Visualizador
 
-Puede:
-
-- Iniciar sesión
 - Consultar dashboard
-- Consultar sesiones
-- Visualizar reportes
-- Cambiar su contraseña
-
-No puede administrar usuarios.
+- Visualizar sesiones
+- Consultar reportes
+- Cambiar contraseña
 
 ---
 
-# Endpoints principales
+# 📡 API
 
 ## Autenticación
 
 | Método | Endpoint |
 |---------|----------|
-| POST | /auth/login |
+| POST | `/auth/login` |
 
 ---
 
 ## Usuarios
 
-| Método | Endpoint |
-|---------|----------|
-| GET | /users |
-| POST | /users |
-| PUT | /users/{uid} |
-| DELETE | /users/{uid} |
-| PATCH | /users/{uid}/enable |
-| PATCH | /users/{uid}/disable |
-| GET | /users/me |
-| PATCH | /users/me/password |
+| Método | Endpoint | Descripción |
+|---------|----------|-------------|
+| GET | `/users` | Lista usuarios |
+| POST | `/users` | Crear usuario |
+| PUT | `/users/{uid}` | Editar usuario |
+| DELETE | `/users/{uid}` | Eliminar usuario |
+| PATCH | `/users/{uid}/enable` | Habilitar |
+| PATCH | `/users/{uid}/disable` | Deshabilitar |
+| GET | `/users/me` | Perfil |
+| PATCH | `/users/me/password` | Cambiar contraseña |
 
 ---
 
-## Dashboard
+# 🛠 Tecnologías
 
-| Método | Endpoint |
-|---------|----------|
-| GET | /dashboard |
-
----
-
-## Sesiones
-
-| Método | Endpoint |
-|---------|----------|
-| GET | /sessions |
-| GET | /sessions/{id} |
-
----
-
-## Importación
-
-| Método | Endpoint |
-|---------|----------|
-| POST | /import/sync |
-
----
-
-## Reportes
-
-| Método | Endpoint |
-|---------|----------|
-| GET | /reports |
-| GET | /reports/export |
-
----
-
-# Seguridad
-
-El backend utiliza:
-
-- JSON Web Token (JWT) para autenticación.
-- Hash de contraseñas mediante Passlib + bcrypt.
-- Control de acceso basado en roles (RBAC).
-- Variables de entorno para proteger información sensible.
-- CORS configurado para comunicación con el frontend.
-
----
-
-# Machine Learning
-
-El sistema utiliza un modelo entrenado con Scikit-Learn para estimar el nivel de bienestar de los participantes a partir de las sesiones de realidad virtual.
-
-Modelo utilizado:
-
-```
-ia/modelo_pipeline.pkl
-```
-
----
-
-# Integración
-
-El backend se comunica con:
-
+- Python
+- Flask
 - Firebase Firestore
-- Firebase Storage
 - AWS S3
-- Frontend React + Electron
+- Scikit-Learn
+- Pandas
+- JWT
+- Passlib
+- Bcrypt
+- Flask-CORS
+- ReportLab
+- OpenPyXL
 
 ---
 
-# Estado del proyecto
+<div align="center">
 
-Backend funcional.
+Desarrollado para el proyecto **EmotionLab** 🧠
 
-Incluye:
-
-- Autenticación JWT
-- CRUD de usuarios
-- Importación de sesiones
-- Predicción mediante IA
-- Reportes
-- Dashboard
----
+</div>
