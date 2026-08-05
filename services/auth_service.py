@@ -53,6 +53,7 @@ class AuthService:
             raise AuthenticationError("El usuario no tiene un identificador valido")
 
         self.user_service.update_last_login(uid)
+        self.user_service.log_activity(uid, "Inicio de sesión", target_uid=uid)
         return {
             "token": self.generate_token(user),
             "user": self._public_user(user),
