@@ -119,6 +119,23 @@ http://localhost:5000
 ```
 
 ---
+
+# 🧪 Pruebas
+
+Ejecutar todas las pruebas
+
+```bash
+pytest
+```
+
+Estado actual
+
+```
+27 tests passed
+```
+
+---
+
 # 👤 Roles
 
 ## Administrador
@@ -180,6 +197,16 @@ http://localhost:5000
 - Flask-CORS
 - ReportLab
 - OpenPyXL
+
+---
+
+# 👩‍💻 Autora
+
+**Emily González**
+
+Ingeniería en Informática
+
+Universidad Andrés Bello
 
 ---
 
