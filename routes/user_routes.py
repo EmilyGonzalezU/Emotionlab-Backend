@@ -173,7 +173,7 @@ def get_current_user():
 @roles_required(ROLE_ADMIN)
 def list_activity():
     service = current_app.extensions["services"]["user_service"]
-    return jsonify(service.list_activity()), 200
+    return jsonify(service.list_activity(limit=8)), 200
 
 
 @users_bp.get("/<uid>/activity")

@@ -115,10 +115,13 @@ class UserService:
         target_uid: Optional[str] = None,
         details: Optional[dict] = None,
     ) -> None:
+        actor = self.get_user(actor_uid) or {}
         data = {
             "fecha": self.firebase.server_timestamp(),
             "usuario": actor_uid,
             "accion": action,
+            "actor_nombre": actor.get("nombre", ""),
+            "actor_email": actor.get("email", ""),
         }
 
         if target_uid is not None:
@@ -132,16 +135,48 @@ class UserService:
             data,
         )
 
-    def list_activity(self, uid: Optional[str] = None) -> List[dict]:
-        activities = self.firebase.list_documents(self.activity_collection)
-        if uid is None:
-            return activities
+    def list_activity(
+        self,
+            uid: Optional[str] = None,
+            limit: Optional[int] = None,
+        ) -> List[dict]:
+            allowed_actions = {
+                "Creación de usuario",
+                "Actualización de usuario",
+                "Cuenta eliminada",
+            }
 
-        return [
-            activity
-            for activity in activities
-            if activity.get("usuario") == uid or activity.get("target_uid") == uid
-        ]
+            activities = [
+                activity
+                for activity in self.firebase.list_documents(self.activity_collection)
+                if activity.get("accion") in allowed_actions
+            ]
+
+            if uid is not None:
+                activities = [
+                    activity
+                    for activity in activities
+                    if activity.get("usuario") == uid
+                    or activity.get("target_uid") == uid
+                ]
+
+            if limit is not None:
+                activities = activities[:limit]
+
+            return [self._enrich_activity(activity) for activity in activities]
+    
+    def _enrich_activity(self, activity: dict) -> dict:
+        enriched = dict(activity)
+        actor_uid = enriched.get("usuario")
+
+        if actor_uid:
+            actor = self.get_user(actor_uid) or {}
+            enriched.setdefault("actor_nombre", actor.get("nombre", ""))
+            enriched.setdefault("actor_email", actor.get("email", ""))
+
+        enriched.setdefault("actor_nombre", "")
+        enriched.setdefault("actor_email", "")
+        return enriched
 
     def update_last_login(self, uid: str) -> None:
         self.update_user(
