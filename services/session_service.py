@@ -66,6 +66,7 @@ class SessionService:
         edad: Optional[int] = None,
         genero: Optional[str] = None,
         difficulty: Optional[str] = None,
+        duracion_estimada: bool = False,
     ) -> dict:
         """Crea una sesion con campos indexables y conserva su JSON original."""
         self._validate_status(status)
@@ -90,6 +91,7 @@ class SessionService:
             "edad": edad,
             "genero": genero,
             "difficulty": difficulty,
+            "duracion_estimada": bool(duracion_estimada),
             "raw_json": deepcopy(dict(raw_json)),
             "created_at": self.firebase.server_timestamp(),
             "updated_at": self.firebase.server_timestamp(),
@@ -230,6 +232,8 @@ class SessionService:
                 "prediction": deepcopy(dict(prediction)),
                 "status": STATUS_PENDING_IDENTIFICATION,
                 "estado": STATUS_PENDING_IDENTIFICATION,
+                "prediction_error": None,
+                "prediction_missing_fields": [],
                 "updated_at": self.firebase.server_timestamp(),
             },
         )
@@ -311,3 +315,61 @@ class SessionService:
     @classmethod
     def _date_time_sort_key(cls, session: Mapping[str, Any]) -> str:
         return f"{cls._get_date(session) or ''}T{session.get('hora') or ''}"
+
+    def update_document_if_supported(
+        self,
+        session_id: str,
+        data: dict,
+    ) -> None:
+        """Actualiza información adicional de una sesión."""
+        if not self.get_session(session_id):
+            raise SessionNotFound("La sesión no existe")
+
+        self.firebase.update_document(
+            self.collection,
+            session_id,
+            {
+                **data,
+                "updated_at": self.firebase.server_timestamp(),
+            },
+        )
+
+
+    def update_session_fields(
+        self,
+        session_id: str,
+        data: dict,
+    ) -> None:
+        """Actualiza campos normalizados de una sesión."""
+        if not self.get_session(session_id):
+            raise SessionNotFound("La sesión no existe")
+
+        self.firebase.update_document(
+            self.collection,
+            session_id,
+            {
+                **data,
+                "updated_at": self.firebase.server_timestamp(),
+            },
+        )
+
+
+    def update_prediction_pending_info(
+        self,
+        session_id: str,
+        missing_fields: list[str],
+    ) -> None:
+        """Guarda el motivo por el que una sesión no pudo ser predicha."""
+
+        if not self.get_session(session_id):
+            raise SessionNotFound("La sesión no existe")
+
+        self.firebase.update_document(
+            self.collection,
+            session_id,
+            {
+                "prediction_error": "Faltan datos requeridos para ejecutar la predicción",
+                "prediction_missing_fields": missing_fields,
+                "updated_at": self.firebase.server_timestamp(),
+            },
+        )

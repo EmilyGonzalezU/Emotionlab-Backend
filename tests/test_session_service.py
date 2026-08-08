@@ -85,6 +85,18 @@ class SessionServiceTests(unittest.TestCase):
         self.assertEqual(session["estado"], "identificada")
         self.assertEqual(session["nombre"], "Ana Lopez")
         self.assertEqual(session["prediction"]["bienestar"], "SI")
+        self.assertIsNone(session["prediction_error"])
+        self.assertEqual(session["prediction_missing_fields"], [])
+
+    def test_persists_estimated_duration_and_pending_prediction_details(self):
+        self.service.create_session(
+            "session-1", {"source": "unity"}, duracion_estimada=True
+        )
+        self.service.update_prediction_pending_info("session-1", ["fechaFin/session_completed/actividad"])
+
+        session = self.service.get_session("session-1")
+        self.assertTrue(session["duracion_estimada"])
+        self.assertEqual(session["prediction_missing_fields"], ["fechaFin/session_completed/actividad"])
 
     def test_teacher_can_update_name_and_observations(self):
         self.service.create_session("session-1", {"source": "unity"})

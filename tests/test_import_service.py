@@ -125,6 +125,35 @@ class ImportServiceTests(unittest.TestCase):
         self.assertEqual(result["total"], 1)
         self.assertEqual(len(result["pending_identification"]), 1)
 
+    def test_imports_activity_estimated_duration_and_defaults(self):
+        record = self._record(attempts=3)
+        data = record["session_data"]
+        data.pop("fechaFin")
+        data["respuestas"] = [{"timestamp": "2026-07-17 10:05:00"}]
+
+        result = self.service.import_batch({"sesiones": [record]})
+
+        session = self.sessions.get_session(result["pending_identification"][0])
+        self.assertEqual(session["edad"], 15)
+        self.assertEqual(session["genero"], "Prefiero no decir")
+        self.assertTrue(session["duracion_estimada"])
+
+    def test_leaves_pending_when_no_end_or_activity_exists(self):
+        record = self._record(attempts=3)
+        data = record["session_data"]
+        data.pop("fechaFin")
+        data["eventos"] = []
+        data["respuestas"] = []
+
+        result = self.service.import_batch({"sesiones": [record]})
+
+        session = self.sessions.get_session(result["pending_prediction"][0])
+        self.assertEqual(session["estado"], STATUS_PENDING_PREDICTION)
+        self.assertEqual(
+            session["prediction_missing_fields"],
+            ["fechaFin/session_completed/actividad"],
+        )
+
     def test_skips_only_the_same_aws_file_on_a_second_sync(self):
         payload = {"sesiones": [self._record(attempts=3)]}
         self.service.import_batch(payload)

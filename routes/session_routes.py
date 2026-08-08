@@ -43,6 +43,9 @@ def get_session(session_id):
         "edad": session.get("edad"),
         "genero": session.get("genero"),
         "difficulty": session.get("difficulty"),
+        "duracion_estimada": session.get("duracion_estimada", False),
+        "prediction_error": session.get("prediction_error"),
+        "prediction_missing_fields": session.get("prediction_missing_fields", []),
         "raw_data": session.get("raw_json"),
     })
 
@@ -80,14 +83,62 @@ def update_session(session_id):
 
 def _session_summary(session):
     prediction = session.get("prediction") or {}
+
     return {
         "session_id": session.get("session_id"),
         "created_at": session.get("created_at"),
         "updated_at": session.get("updated_at"),
+
         "hora": session.get("hora"),
         "edad": session.get("edad"),
         "genero": session.get("genero"),
+        "difficulty": session.get("difficulty"),
+
         "bienestar": prediction.get("bienestar"),
+        "probabilidad": prediction.get("probabilidad"),
+        "confianza": prediction.get("confianza"),
+
         "nombre": session.get("nombre"),
-        "estado": session.get("estado", session.get("status")),
+
+        "estado": session.get(
+            "estado",
+            session.get("status")
+        ),
+
+        "duracion_estimada": session.get("duracion_estimada", False),
+
+        "prediction_error": session.get(
+            "prediction_error"
+        ),
+
+        "prediction_missing_fields": session.get(
+            "prediction_missing_fields",
+            []
+        ),
     }
+
+@sessions_bp.post("/import")
+@jwt_required
+@roles_required(ROLE_ADMIN, ROLE_TEACHER)
+def import_sessions():
+    import_service = current_app.extensions["services"]["import_service"]
+    aws_service = current_app.extensions["services"]["aws_service"]
+
+    try:
+        result = import_service.import_from_aws(aws_service)
+
+        return jsonify(result), 200
+
+    except ValueError as error:
+        return jsonify({
+            "error": str(error)
+        }), 400
+
+    except Exception:
+        current_app.logger.exception(
+            "Error importando sesiones desde AWS"
+        )
+
+        return jsonify({
+            "error": "No se pudieron importar las sesiones"
+        }), 500

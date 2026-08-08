@@ -49,6 +49,7 @@ class SessionParserTests(unittest.TestCase):
                 "genero": "Femenino",
                 "difficulty": "dificil",
                 "duracion": 273,
+                "duracion_estimada": False,
             },
         )
 
@@ -103,3 +104,41 @@ class SessionParserTests(unittest.TestCase):
         self.assertTrue(parser.can_predict())
         self.assertEqual(parser.get_end_date().strftime("%Y-%m-%d %H:%M:%S.%f"), "2026-07-17 00:54:12.661000")
         self.assertEqual(parser.get_duration(), 273)
+
+    def test_estimates_end_date_from_last_activity_when_no_real_end_exists(self):
+        parser = SessionParser(
+            {
+                "session_data": {
+                    "fechaInicio": "2026-07-16 23:33:04",
+                    "difficulty_level": "medio",
+                    "respuestas": [
+                        {"idPregunta": "edad", "respuestaLabel": ""},
+                        {"idPregunta": "genero", "respuestaLabel": ""},
+                        {"timestamp": "2026-07-16 23:37:26"},
+                    ],
+                    "eventos": [{"nombre": "activity", "timestamp": "2026-07-16 23:35:00"}],
+                }
+            }
+        )
+
+        self.assertTrue(parser.can_predict())
+        self.assertEqual(parser.get_age(), 15)
+        self.assertEqual(parser.get_gender(), "Prefiero no decir")
+        self.assertEqual(parser.get_duration(), 262)
+        self.assertTrue(parser.has_estimated_end_date())
+        self.assertTrue(parser.get_dashboard_summary()["duracion_estimada"])
+
+    def test_requires_activity_after_start_when_no_end_date_exists(self):
+        parser = SessionParser(
+            {
+                "session_data": {
+                    "fechaInicio": "2026-07-16 23:33:04",
+                    "difficulty_level": "medio",
+                    "respuestas": [{"timestamp": "2026-07-16 23:33:04"}],
+                    "eventos": [],
+                }
+            }
+        )
+
+        self.assertFalse(parser.can_predict())
+        self.assertIn("fechaFin/session_completed/actividad", parser.get_prediction_missing_fields())
