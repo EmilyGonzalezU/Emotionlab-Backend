@@ -1,8 +1,6 @@
 from flask import Blueprint, current_app, jsonify, request
 
-
 auth_bp = Blueprint("auth", __name__, url_prefix="/auth")
-
 
 @auth_bp.post("/login")
 def login():

@@ -10,7 +10,7 @@ sessions_bp = Blueprint("sessions", __name__, url_prefix="/sessions")
 
 @sessions_bp.get("")
 @jwt_required
-@roles_required(ROLE_ADMIN, ROLE_TEACHER)
+@roles_required(ROLE_TEACHER)
 def list_sessions():
     service = current_app.extensions["services"]["session_service"]
     name = request.args.get("name")
@@ -26,7 +26,7 @@ def list_sessions():
 
 @sessions_bp.get("/<session_id>")
 @jwt_required
-@roles_required(ROLE_ADMIN, ROLE_TEACHER)
+@roles_required(ROLE_TEACHER)
 def get_session(session_id):
     session = current_app.extensions["services"]["session_service"].get_session_detail(session_id)
     if not session:
@@ -49,37 +49,13 @@ def get_session(session_id):
         "raw_data": session.get("raw_json"),
     })
 
-
-@sessions_bp.patch("/<session_id>/status")
-@jwt_required
-@roles_required(ROLE_ADMIN)
-def update_status(session_id):
-    status = (request.get_json(silent=True) or {}).get("status")
-    if not status:
-        return jsonify({"error": "status es obligatorio"}), 400
-    current_app.extensions["services"]["session_service"].update_status(session_id, status)
-    return jsonify({"session_id": session_id, "status": status})
-
-
-@sessions_bp.patch("/<session_id>/prediction")
-@jwt_required
-@roles_required(ROLE_ADMIN)
-def update_prediction(session_id):
-    prediction = (request.get_json(silent=True) or {}).get("prediction")
-    if not prediction:
-        return jsonify({"error": "prediction es obligatoria"}), 400
-    current_app.extensions["services"]["session_service"].update_prediction(session_id, prediction)
-    return jsonify({"session_id": session_id, "updated": True})
-
-
 @sessions_bp.patch("/<session_id>")
 @jwt_required
-@roles_required(ROLE_ADMIN, ROLE_TEACHER)
+@roles_required(ROLE_TEACHER)
 def update_session(session_id):
     body = request.get_json(silent=True) or {}
     current_app.extensions["services"]["session_service"].update_session(session_id, body)
     return jsonify({"session_id": session_id, "updated": True})
-
 
 def _session_summary(session):
     prediction = session.get("prediction") or {}
@@ -119,7 +95,7 @@ def _session_summary(session):
 
 @sessions_bp.post("/import")
 @jwt_required
-@roles_required(ROLE_ADMIN, ROLE_TEACHER)
+@roles_required(ROLE_TEACHER)
 def import_sessions():
     import_service = current_app.extensions["services"]["import_service"]
     aws_service = current_app.extensions["services"]["aws_service"]
@@ -141,4 +117,61 @@ def import_sessions():
 
         return jsonify({
             "error": "No se pudieron importar las sesiones"
+        }), 500
+
+@sessions_bp.patch("/<session_id>/name")
+@jwt_required
+@roles_required(ROLE_TEACHER)
+def update_session_name(session_id):
+    """
+    Permite únicamente al visualizador/teacher
+    identificar una sesión con el nombre del alumno.
+    """
+
+    body = request.get_json(silent=True) or {}
+    nombre = body.get("nombre")
+
+    if nombre is None:
+        return jsonify({
+            "error": "El nombre es obligatorio"
+        }), 400
+
+    if not isinstance(nombre, str):
+        return jsonify({
+            "error": "El nombre debe ser texto"
+        }), 400
+
+    nombre = nombre.strip()
+
+    if not nombre:
+        return jsonify({
+            "error": "El nombre no puede estar vacío"
+        }), 400
+
+    try:
+        session_service = current_app.extensions["services"]["session_service"]
+
+        session_service.update_name(
+            session_id,
+            nombre
+        )
+
+        return jsonify({
+            "session_id": session_id,
+            "nombre": nombre,
+            "updated": True
+        }), 200
+
+    except Exception as error:
+        current_app.logger.exception(
+            "Error actualizando nombre de sesión"
+        )
+
+        if "no existe" in str(error).lower():
+            return jsonify({
+                "error": "Sesión no encontrada"
+            }), 404
+
+        return jsonify({
+            "error": "No se pudo actualizar el nombre"
         }), 500

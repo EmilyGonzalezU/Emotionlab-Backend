@@ -10,6 +10,11 @@ from typing import TYPE_CHECKING, Any, Mapping, Optional
 
 from core.constants import COLLECTION_SESSIONS
 from core.exceptions import SessionNotFound
+from services.cache_service import (
+    IMPORT_INDEX_CACHE,
+    SESSION_CACHE,
+    invalidate_sessions_cache,
+)
 
 if TYPE_CHECKING:
     from services.firebase_service import FirebaseService
@@ -97,6 +102,7 @@ class SessionService:
             "updated_at": self.firebase.server_timestamp(),
         }
         self.firebase.create_document(self.collection, session_id, data)
+        invalidate_sessions_cache()
         return data
 
     def get_session(self, session_id: str) -> Optional[dict]:
@@ -111,6 +117,41 @@ class SessionService:
         )
         return matches[0] if matches else None
 
+    def build_import_index(self) -> tuple[dict[str, dict], dict[str, dict]]:
+        """Crea un índice de deduplicación con caché TTL.
+
+        La importación AWS incremental suele invocarse repetidamente en poco
+        tiempo; este caché evita re-leer la colección completa de sesiones
+        entre cada importación consecutivo.
+        """
+        cache_key = ("import_index",)
+        cached = IMPORT_INDEX_CACHE.get(cache_key)
+        if isinstance(cached, tuple) and len(cached) == 2:
+            by_source_key, by_session_id = cached
+            if isinstance(by_source_key, dict) and isinstance(by_session_id, dict):
+                return dict(by_source_key), dict(by_session_id)
+
+        by_source_key: dict[str, dict] = {}
+        by_session_id: dict[str, dict] = {}
+        for session in self.firebase.list_documents(self.collection):
+            summary = {
+                "id": session.get("id"),
+                "session_id": session.get("session_id") or session.get("id"),
+                "source_key": session.get("source_key"),
+                "status": session.get("status") or session.get("estado"),
+                "estado": session.get("estado") or session.get("status"),
+            }
+            if summary["source_key"]:
+                by_source_key[summary["source_key"]] = summary
+            if summary["session_id"]:
+                by_session_id[summary["session_id"]] = summary
+
+        IMPORT_INDEX_CACHE.set(
+            cache_key,
+            (dict(by_source_key), dict(by_session_id)),
+        )
+        return by_source_key, by_session_id
+
     def get_session_detail(self, session_id: str) -> Optional[dict]:
         """Retorna el documento completo, incluido su JSON original."""
         return self.get_session(session_id)
@@ -122,9 +163,21 @@ class SessionService:
         date_to: Optional[str] = None,
         status: Optional[str] = None,
     ) -> list[dict]:
-        """Lista sesiones y aplica filtros sobre los campos indexables."""
+        """Lista sesiones y aplica filtros sobre los campos indexables.
+
+        Cachea durante 20s los listados con los mismos parámetros; esto evita
+        lecturas repetidas por el dashboard Admin (varios endpoints lo usan)
+        y por re-renders de React.
+        """
         if status is not None:
             self._validate_status(status)
+
+        cache_key = ("sessions", status, date_from, date_to)
+        cached = SESSION_CACHE.get(cache_key)
+        if isinstance(cached, list):
+            return [dict(item) for item in cached]
+
+        if status is not None:
             sessions = self.firebase.query_documents(
                 collection=self.collection,
                 field="status",
@@ -139,14 +192,28 @@ class SessionService:
             for session in sessions
             if self._is_in_date_range(self._get_date(session), date_from, date_to)
         ]
-        return sorted(filtered, key=self._date_time_sort_key, reverse=True)
+        result = sorted(filtered, key=self._date_time_sort_key, reverse=True)
+        SESSION_CACHE.set(cache_key, [dict(item) for item in result])
+        return result
 
     def list_sessions_by_date(
         self, fecha: str
     ) -> list[dict]:
-        """Lista las sesiones de un dia concreto para el detalle del dashboard."""
+        """Lista las sesiones de un día concreto usando query Firestore directa."""
         self._validate_date(fecha)
-        return [session for session in self.list_sessions() if self._get_date(session) == fecha]
+        exact_match = self.firebase.query_documents(
+            collection=self.collection,
+            field="fecha",
+            operator="==",
+            value=fecha,
+        )
+        if exact_match:
+            return sorted(exact_match, key=self._date_time_sort_key, reverse=True)
+        fallback = [
+            session for session in self.list_sessions()
+            if self._get_date(session) == fecha
+        ]
+        return sorted(fallback, key=self._date_time_sort_key, reverse=True)
 
     def list_dates(self) -> list[str]:
         """Devuelve los dias con sesiones, ordenados del mas reciente al mas antiguo."""
@@ -156,10 +223,24 @@ class SessionService:
         )
 
     def list_pending_sessions(self) -> list[dict]:
-        """Devuelve sesiones que necesitan prediccion o asignacion."""
-        pending = []
-        for status in (STATUS_PENDING_PREDICTION, STATUS_PENDING_ASSIGNMENT):
-            pending.extend(self.list_sessions(status=status))
+        """Devuelve sesiones que necesitan prediccion o asignacion.
+
+        Fusiona ambos estados en una sola consulta de Firestore usando
+        ``in`` para evitar dos lecturas independientes. Si la colección
+        requiere un índice compuesto y aún no existe, se usa un fallback
+        con las dos consultas individuales originales.
+        """
+        try:
+            pending = self.firebase.query_documents(
+                collection=self.collection,
+                field="status",
+                operator="in",
+                value=[STATUS_PENDING_PREDICTION, STATUS_PENDING_ASSIGNMENT],
+            )
+        except Exception:
+            pending = []
+            for status in (STATUS_PENDING_PREDICTION, STATUS_PENDING_ASSIGNMENT):
+                pending.extend(self.list_sessions(status=status))
         return sorted(pending, key=self._date_time_sort_key, reverse=True)
 
     def list_unassigned_sessions(self) -> list[dict]:
@@ -180,24 +261,40 @@ class SessionService:
         self.update_name(session_id, participant_id)
 
     def update_name(self, session_id: str, nombre: str) -> None:
-        """Identifica manualmente una sesion sin relacionarla a otra coleccion."""
+        """Identifica manualmente una sesion sin relacionarla a otra coleccion.
+
+        Optimizado: no realiza una lectura previa de existencia; en su lugar
+        captura el fallo del ``update_document`` de Firestore cuando la
+        sesión no existe y eleva la misma excepción ``SessionNotFound``.
+        """
         if not isinstance(nombre, str) or not nombre.strip():
             raise ValueError("nombre debe ser texto no vacio")
-        if not self.get_session(session_id):
-            raise SessionNotFound("La sesion no existe")
-        self.firebase.update_document(
-            self.collection,
-            session_id,
-            {
-                "nombre": nombre.strip(),
-                "status": STATUS_IDENTIFIED,
-                "estado": STATUS_IDENTIFIED,
-                "updated_at": self.firebase.server_timestamp(),
-            },
-        )
+        payload = {
+            "nombre": nombre.strip(),
+            "status": STATUS_IDENTIFIED,
+            "estado": STATUS_IDENTIFIED,
+            "updated_at": self.firebase.server_timestamp(),
+        }
+        try:
+            self.firebase.update_document(self.collection, session_id, payload)
+            invalidate_sessions_cache()
+        except Exception as error:
+            message = str(error).lower()
+            if (
+                "not found" in message
+                or "no existe" in message
+                or "document" in message
+            ):
+                raise SessionNotFound("La sesion no existe") from error
+            raise
 
     def update_session(self, session_id: str, data: Mapping[str, Any]) -> None:
-        """Actualiza los datos manuales permitidos por el profesor."""
+        """Actualiza los datos manuales permitidos por el profesor.
+
+        Optimizado: no realiza una lectura previa de existencia; captura
+        el fallo del update_document de Firestore para mantener el mismo
+        contrato externo ``SessionNotFound`` cuando no existe.
+        """
         if not isinstance(data, Mapping):
             raise ValueError("data debe ser un objeto")
         allowed = {"nombre", "observaciones"}
@@ -216,10 +313,19 @@ class SessionService:
         if "observaciones" in changes and changes["observaciones"] is not None:
             if not isinstance(changes["observaciones"], str):
                 raise ValueError("observaciones debe ser texto o null")
-        if not self.get_session(session_id):
-            raise SessionNotFound("La sesion no existe")
         changes["updated_at"] = self.firebase.server_timestamp()
-        self.firebase.update_document(self.collection, session_id, changes)
+        try:
+            self.firebase.update_document(self.collection, session_id, changes)
+            invalidate_sessions_cache()
+        except Exception as error:
+            message = str(error).lower()
+            if (
+                "not found" in message
+                or "no existe" in message
+                or "document" in message
+            ):
+                raise SessionNotFound("La sesion no existe") from error
+            raise
 
     def update_prediction(self, session_id: str, prediction: Mapping[str, Any]) -> None:
         """Guarda una prediccion calculada y deja la sesion lista para asignar."""
@@ -237,6 +343,7 @@ class SessionService:
                 "updated_at": self.firebase.server_timestamp(),
             },
         )
+        invalidate_sessions_cache()
 
     def update_status(self, session_id: str, status: str) -> None:
         """Actualiza el estado explicito del flujo de procesamiento."""
@@ -246,6 +353,7 @@ class SessionService:
             session_id,
             {"status": status, "estado": status, "updated_at": self.firebase.server_timestamp()},
         )
+        invalidate_sessions_cache()
 
     def search_by_name(self, nombre: str) -> list[dict]:
         """Obtiene el historial por el nombre escrito manualmente por el profesor."""
@@ -257,6 +365,7 @@ class SessionService:
 
     def delete_session(self, session_id: str) -> None:
         self.firebase.delete_document(self.collection, session_id)
+        invalidate_sessions_cache()
 
     @staticmethod
     def _validate_status(status: str) -> None:
@@ -322,9 +431,6 @@ class SessionService:
         data: dict,
     ) -> None:
         """Actualiza información adicional de una sesión."""
-        if not self.get_session(session_id):
-            raise SessionNotFound("La sesión no existe")
-
         self.firebase.update_document(
             self.collection,
             session_id,
@@ -333,6 +439,7 @@ class SessionService:
                 "updated_at": self.firebase.server_timestamp(),
             },
         )
+        invalidate_sessions_cache()
 
 
     def update_session_fields(
@@ -341,9 +448,6 @@ class SessionService:
         data: dict,
     ) -> None:
         """Actualiza campos normalizados de una sesión."""
-        if not self.get_session(session_id):
-            raise SessionNotFound("La sesión no existe")
-
         self.firebase.update_document(
             self.collection,
             session_id,
@@ -352,6 +456,7 @@ class SessionService:
                 "updated_at": self.firebase.server_timestamp(),
             },
         )
+        invalidate_sessions_cache()
 
 
     def update_prediction_pending_info(
@@ -360,10 +465,6 @@ class SessionService:
         missing_fields: list[str],
     ) -> None:
         """Guarda el motivo por el que una sesión no pudo ser predicha."""
-
-        if not self.get_session(session_id):
-            raise SessionNotFound("La sesión no existe")
-
         self.firebase.update_document(
             self.collection,
             session_id,
@@ -373,3 +474,25 @@ class SessionService:
                 "updated_at": self.firebase.server_timestamp(),
             },
         )
+        invalidate_sessions_cache()
+
+    def get_session_by_session_id(self, session_id: str):
+        """
+        Busca una sesión utilizando el session_id real
+        proporcionado por Unity.
+        """
+
+        if not session_id:
+            return None
+
+        try:
+            return self.get_session(session_id)
+
+        except Exception as error:
+
+            print(
+                f"Error buscando sesión por session_id "
+                f"{session_id}: {error}"
+            )
+
+            return None
