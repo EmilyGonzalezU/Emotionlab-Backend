@@ -1,4 +1,4 @@
-"""Punto de entrada y fabrica de la API Flask de EmotionLab."""
+"""Punto de entrada y fábrica de la API Flask de EmotionLab."""
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify
@@ -13,6 +13,7 @@ from core.exceptions import (
     SessionNotFound,
     UserNotFound,
 )
+
 from routes.auth_routes import auth_bp
 from routes.dashboard_routes import dashboard_bp
 from routes.import_routes import imports_bp
@@ -21,18 +22,33 @@ from routes.session_routes import sessions_bp
 from routes.user_routes import users_bp
 
 
+def _cors_origen_permitido(origin):
+    permitidos = {
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "null",
+        "",
+    }
+    if origin is None:
+        return True
+    return origin in permitidos
+
+
 def create_app(services: dict | None = None) -> Flask:
-    """Construye la aplicacion; ``services`` permite pruebas sin Firebase real."""
+    """Construye la aplicación Flask."""
+
     app = Flask(__name__)
+
     app.extensions["services"] = services or _build_services()
 
     CORS(
         app,
         resources={
             r"/*": {
-                "origins": [
-                    "http://localhost:5173"
-                ]
+                "origins": _cors_origen_permitido,
+                "always_send": True,
+                "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                "allow_headers": ["Content-Type", "Authorization"],
             }
         }
     )
@@ -42,6 +58,7 @@ def create_app(services: dict | None = None) -> Flask:
         return jsonify({"status": "healthy"})
 
     _register_error_handlers(app)
+
     for blueprint in (
         auth_bp,
         users_bp,
@@ -51,6 +68,7 @@ def create_app(services: dict | None = None) -> Flask:
         imports_bp,
     ):
         app.register_blueprint(blueprint)
+
     return app
 
 
@@ -69,22 +87,32 @@ def _build_services() -> dict:
     user_service = UserService()
     session_service = SessionService()
     prediction_service = PredictionService()
+
     return {
         "crypto_service": crypto_service,
         "aws_service": AWSService(),
         "user_service": user_service,
-        "auth_service": AuthService(user_service, crypto_service),
+        "auth_service": AuthService(
+            user_service,
+            crypto_service,
+        ),
         "session_service": session_service,
         "prediction_service": prediction_service,
         "import_service": ImportService(
-            session_service, prediction_service=prediction_service
+            session_service,
+            prediction_service=prediction_service,
         ),
-        "dashboard_service": DashboardService(session_service),
-        "report_service": ReportService(session_service),
+        "dashboard_service": DashboardService(
+            session_service
+        ),
+        "report_service": ReportService(
+            session_service
+        ),
     }
 
 
 def _register_error_handlers(app: Flask) -> None:
+
     @app.errorhandler(InvalidCredentials)
     @app.errorhandler(AuthenticationError)
     def authentication_error(error):
@@ -104,5 +132,13 @@ def _register_error_handlers(app: Flask) -> None:
         return jsonify({"error": str(error)}), 400
 
 
+app = create_app()
+
+
 if __name__ == "__main__":
-    create_app().run(debug=True)
+    app.run(
+        host="127.0.0.1",
+        port=5000,
+        debug=False,
+        use_reloader=False,
+    )

@@ -213,6 +213,12 @@ def change_password():
             "error": "current_password y new_password son obligatorios"
         }), 400
 
+    # ✅ VALIDACIÓN DE LONGITUD MÍNIMA
+    if len(body["new_password"]) < 8:
+        return jsonify({
+            "error": "La nueva contraseña debe tener al menos 8 caracteres"
+        }), 400
+
     services = _services()
     crypto_service = services["crypto_service"]
     user_service = services["user_service"]
@@ -235,7 +241,6 @@ def change_password():
     )
 
     return jsonify({"message": "Contraseña actualizada correctamente"}), 200
-
 
 # ============================================================
 # USUARIO ACTUAL
