@@ -45,12 +45,13 @@ def create_app(services: dict | None = None) -> Flask:
         app,
         resources={
             r"/*": {
-                "origins": _cors_origen_permitido,
+                "origins": ["http://localhost:5173", "http://127.0.0.1:5173"],
                 "always_send": True,
                 "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
                 "allow_headers": ["Content-Type", "Authorization"],
             }
-        }
+        },
+        supports_credentials=True
     )
 
     @app.get("/health")

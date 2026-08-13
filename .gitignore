@@ -4,3 +4,8 @@ build/
 __pycache__/
 .env
 firebase_key.json
+
+# Agregado por seguridad
+venv/
+env/
+credentials/

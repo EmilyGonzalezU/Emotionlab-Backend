@@ -18,6 +18,12 @@ class UserService:
         self.collection = COLLECTION_USERS
         self.activity_collection = COLLECTION_USER_ACTIVITY
 
+        
+    def generate_password_reset_link(self, email: str) -> str:
+        """Genera un link de recuperación usando Firebase Auth."""
+        from firebase_admin import auth
+        return auth.generate_password_reset_link(email)
+
     # =========================================================
     # USUARIOS
     # =========================================================
