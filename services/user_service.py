@@ -1,10 +1,12 @@
 """Servicio encargado de administrar los usuarios del sistema."""
 
+from collections.abc import Mapping
 from typing import List, Optional
 from uuid import uuid4
 
 from core.constants import COLLECTION_USER_ACTIVITY, COLLECTION_USERS
 from core.roles import ROLE_ADMIN, ROLE_TEACHER, VALID_ROLES
+from services.cache_service import USER_CACHE, invalidate_user_cache
 from services.firebase_service import firebase
 
 
@@ -16,6 +18,16 @@ class UserService:
         self.collection = COLLECTION_USERS
         self.activity_collection = COLLECTION_USER_ACTIVITY
 
+        
+    def generate_password_reset_link(self, email: str) -> str:
+        """Genera un link de recuperación usando Firebase Auth."""
+        from firebase_admin import auth
+        return auth.generate_password_reset_link(email)
+
+    # =========================================================
+    # USUARIOS
+    # =========================================================
+
     def create_user(
         self,
         uid: str,
@@ -24,7 +36,8 @@ class UserService:
         rol: str,
         password_hash: Optional[str] = None,
     ) -> dict:
-        """Crea un usuario; ``password_hash`` debe venir de ``CryptoService``."""
+        """Crea un usuario y retorna su representación pública sin re-leer Firestore."""
+
         if rol not in VALID_ROLES:
             raise ValueError(f"Rol no valido: {rol}")
 
@@ -40,19 +53,26 @@ class UserService:
         if password_hash is not None:
             data["password_hash"] = password_hash
 
-        self.firebase.create_document(self.collection, uid, data)
+        self.firebase.create_document(
+            self.collection,
+            uid,
+            data,
+        )
+        invalidate_user_cache(uid)
 
-        persisted = self.firebase.get_document(self.collection, uid)
-
-        if persisted is None:
-            safe = dict(data)
-            safe.pop("created_at", None)
-            return safe
-
-        return persisted
+        return self.public_user(data)
 
     def get_user(self, uid: str) -> Optional[dict]:
-        return self.firebase.get_document(self.collection, uid)
+        """Devuelve un usuario por uid, con caché TTL para reducir lecturas."""
+        cache_key = ("user", uid)
+        cached = USER_CACHE.get(cache_key)
+        if cached is not None:
+            return dict(cached)
+        user = self.firebase.get_document(self.collection, uid)
+        if user is not None:
+            USER_CACHE.set(cache_key, dict(user))
+            return user
+        return None
 
     def get_by_email(self, email: str) -> Optional[dict]:
         users = self.firebase.query_documents(
@@ -61,16 +81,29 @@ class UserService:
             operator="==",
             value=email.lower(),
         )
-        return users[0] if users else None
+        if not users:
+            return None
+        user = users[0]
+        uid = user.get("uid")
+        if uid:
+            USER_CACHE.set(("user", uid), dict(user))
+        return user
 
     def list_users(self) -> List[dict]:
         """Lista todos los usuarios."""
-        return self.firebase.list_documents(self.collection)
+        return self.firebase.list_documents(
+            self.collection
+        )
 
     @staticmethod
     def public_user(user: dict) -> dict:
         """Elimina credenciales antes de exponer un usuario."""
-        private_fields = {"password", "password_hash"}
+
+        private_fields = {
+            "password",
+            "password_hash",
+        }
+
         return {
             key: value
             for key, value in user.items()
@@ -78,10 +111,14 @@ class UserService:
         }
 
     def list_public_users(self) -> List[dict]:
-        return [self.public_user(user) for user in self.list_users()]
+        return [
+            self.public_user(user)
+            for user in self.list_users()
+        ]
 
     def list_teachers(self) -> List[dict]:
-        """Lista únicamente los visualizadores."""
+        """Lista únicamente los teachers."""
+
         return self.firebase.query_documents(
             collection=self.collection,
             field="rol",
@@ -96,17 +133,112 @@ class UserService:
             if user.get("activo", False)
         ]
 
-    def update_user(self, uid: str, data: dict) -> None:
-        """Actualiza datos generales del usuario."""
-        self.firebase.update_document(self.collection, uid, data)
+    def update_user(
+        self,
+        uid: str,
+        data: dict,
+    ) -> None:
+        """Actualiza datos generales del usuario e invalida su caché."""
 
-    def update_password(self, uid: str, password_hash: str) -> None:
-        """Actualiza únicamente el hash de la contraseña."""
         self.firebase.update_document(
             self.collection,
             uid,
-            {"password_hash": password_hash},
+            data,
         )
+        invalidate_user_cache(uid)
+
+    def update_password(
+        self,
+        uid: str,
+        password_hash: str,
+    ) -> None:
+        """Actualiza únicamente el hash de la contraseña e invalida caché."""
+
+        self.firebase.update_document(
+            self.collection,
+            uid,
+            {
+                "password_hash": password_hash,
+            },
+        )
+        invalidate_user_cache(uid)
+
+    def disable_user(self, uid: str) -> None:
+        self.update_user(
+            uid,
+            {
+                "activo": False,
+            },
+        )
+
+    def enable_user(self, uid: str) -> None:
+        self.update_user(
+            uid,
+            {
+                "activo": True,
+            },
+        )
+
+    def delete_user(self, uid: str) -> None:
+        self.firebase.delete_document(
+            self.collection,
+            uid,
+        )
+        invalidate_user_cache(uid)
+
+    def exists(self, uid: str) -> bool:
+        return self.get_user(uid) is not None
+
+    def is_admin(self, uid: str) -> bool:
+        user = self.get_user(uid)
+
+        return bool(
+            user
+            and user.get("rol") == ROLE_ADMIN
+        )
+
+    def is_teacher(self, uid: str) -> bool:
+        user = self.get_user(uid)
+
+        return bool(
+            user
+            and user.get("rol") == ROLE_TEACHER
+        )
+
+    def is_active(self, uid: str) -> bool:
+        user = self.get_user(uid)
+
+        return bool(
+            user
+            and user.get("activo", False)
+        )
+
+    def update_last_login(self, uid: str) -> None:
+        self.update_user(
+            uid,
+            {
+                "ultimo_login": self.firebase.server_timestamp()
+            },
+        )
+
+    # =========================================================
+    # ACTIVIDAD ADMINISTRATIVA
+    # =========================================================
+
+    @staticmethod
+    def _allowed_activity_actions() -> set[str]:
+        """
+        Acciones que pueden aparecer en el historial administrativo.
+
+        IMPORTANTE:
+        Solo estas tres acciones se almacenan en Firestore.
+        """
+
+        return {
+            "Creación de usuario",
+            "Actualización de usuario",
+            "Cuenta eliminada",
+        }
 
     def log_activity(
         self,
@@ -114,8 +246,31 @@ class UserService:
         action: str,
         target_uid: Optional[str] = None,
         details: Optional[dict] = None,
+        *,
+        actor_info: Optional[dict] = None,
     ) -> None:
-        actor = self.get_user(actor_uid) or {}
+        """
+        Registra una actividad administrativa.
+
+        ``actor_info`` (opcional) = diccionario con el usuario ya cargado
+        (``rol``, ``nombre``, ``email``). Si se provee se evita una lectura
+        Firestore. De lo contrario se consulta al actor.
+        """
+
+        allowed_actions = self._allowed_activity_actions()
+
+        if action not in allowed_actions:
+            return
+
+        # -----------------------------------------------------
+        # Obtener info del actor (preferentemente precargada)
+        # -----------------------------------------------------
+
+        actor = actor_info if isinstance(actor_info, Mapping) else (self.get_user(actor_uid) or {})
+
+        if actor.get("rol") != ROLE_ADMIN:
+            return
+
         data = {
             "fecha": self.firebase.server_timestamp(),
             "usuario": actor_uid,
@@ -126,6 +281,7 @@ class UserService:
 
         if target_uid is not None:
             data["target_uid"] = target_uid
+
         if details:
             data["detalles"] = details
 
@@ -137,73 +293,63 @@ class UserService:
 
     def list_activity(
         self,
-            uid: Optional[str] = None,
-            limit: Optional[int] = None,
-        ) -> List[dict]:
-            allowed_actions = {
-                "Creación de usuario",
-                "Actualización de usuario",
-                "Cuenta eliminada",
-            }
+        uid: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> List[dict]:
+        """
+        Lista únicamente actividades administrativas válidas.
 
+        Elimina el patrón N+1: ``actor_nombre`` y ``actor_email`` ya
+        se persistieron al crear el log, por lo que no se vuelven a
+        consultar los usuarios en Firestore.
+        """
+
+        allowed_actions = self._allowed_activity_actions()
+
+        activities = [
+            activity
+            for activity in self.firebase.list_documents(
+                self.activity_collection
+            )
+            if activity.get("accion") in allowed_actions
+        ]
+
+        if uid is not None:
             activities = [
                 activity
-                for activity in self.firebase.list_documents(self.activity_collection)
-                if activity.get("accion") in allowed_actions
+                for activity in activities
+                if (
+                    activity.get("usuario") == uid
+                    or activity.get("target_uid") == uid
+                )
             ]
 
-            if uid is not None:
-                activities = [
-                    activity
-                    for activity in activities
-                    if activity.get("usuario") == uid
-                    or activity.get("target_uid") == uid
-                ]
+        if limit is not None:
+            activities = activities[:limit]
 
-            if limit is not None:
-                activities = activities[:limit]
+        return [
+            self._enrich_activity(activity)
+            for activity in activities
+        ]
 
-            return [self._enrich_activity(activity) for activity in activities]
-    
-    def _enrich_activity(self, activity: dict) -> dict:
+    def _enrich_activity(
+        self,
+        activity: dict,
+    ) -> dict:
+        """
+        Asegura campos de presentación.
+
+        Los valores de ``actor_nombre`` y ``actor_email`` se grabaron
+        originalmente en el momento del log y son la fuente oficial.
+        Para registros históricos sin estos campos se usan valores
+        por defecto para no disparar consultas N+1.
+        """
+
         enriched = dict(activity)
-        actor_uid = enriched.get("usuario")
 
-        if actor_uid:
-            actor = self.get_user(actor_uid) or {}
-            enriched.setdefault("actor_nombre", actor.get("nombre", ""))
-            enriched.setdefault("actor_email", actor.get("email", ""))
+        if not isinstance(enriched.get("actor_nombre"), str):
+            enriched["actor_nombre"] = ""
+        if not isinstance(enriched.get("actor_email"), str):
+            enriched["actor_email"] = ""
 
-        enriched.setdefault("actor_nombre", "")
-        enriched.setdefault("actor_email", "")
         return enriched
-
-    def update_last_login(self, uid: str) -> None:
-        self.update_user(
-            uid,
-            {"ultimo_login": self.firebase.server_timestamp()},
-        )
-
-    def disable_user(self, uid: str) -> None:
-        self.update_user(uid, {"activo": False})
-
-    def enable_user(self, uid: str) -> None:
-        self.update_user(uid, {"activo": True})
-
-    def delete_user(self, uid: str) -> None:
-        self.firebase.delete_document(self.collection, uid)
-
-    def exists(self, uid: str) -> bool:
-        return self.get_user(uid) is not None
-
-    def is_admin(self, uid: str) -> bool:
-        user = self.get_user(uid)
-        return bool(user and user.get("rol") == ROLE_ADMIN)
-
-    def is_teacher(self, uid: str) -> bool:
-        user = self.get_user(uid)
-        return bool(user and user.get("rol") == ROLE_TEACHER)
-
-    def is_active(self, uid: str) -> bool:
-        user = self.get_user(uid)
-        return bool(user and user.get("activo", False))

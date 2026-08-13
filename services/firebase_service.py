@@ -1,25 +1,9 @@
-"""
-services/firebase_service.py
-
-Servicio base para administrar la conexión con Firebase Firestore.
-
-Este servicio NO contiene lógica de negocio.
-Su única responsabilidad es inicializar Firebase y entregar
-la instancia de Firestore al resto de los servicios.
-
-Todos los demás servicios deben importar la instancia:
-
-    from services.firebase_service import firebase
-
-Nunca deben importar firebase_admin directamente.
-"""
-
 from pathlib import Path
 from weakref import ref
 
 import firebase_admin
 from firebase_admin import credentials, firestore
-
+import sys
 
 class FirebaseService:
     """
@@ -48,13 +32,41 @@ class FirebaseService:
     def _initialize(self):
         """
         Inicializa Firebase únicamente una vez.
+
+        Busca la configuración externa de Firebase tanto
+        en desarrollo como en la aplicación empaquetada.
         """
 
         if firebase_admin._apps:
             self.db = firestore.client()
             return
 
-        base_path = Path(__file__).resolve().parent.parent
+        # ---------------------------------------------------------
+        # DETERMINAR UBICACIÓN DE CONFIGURACIÓN
+        # ---------------------------------------------------------
+
+        if getattr(sys, "frozen", False):
+
+            # EmotionLabBackend.exe:
+            #
+            # resources/
+            # ├── backend/
+            # │   └── EmotionLabBackend.exe
+            # └── config/
+            #     └── firebase_key.json
+            #
+            base_path = Path(sys.executable).resolve().parent.parent
+
+        else:
+
+            # Desarrollo:
+            #
+            # EmotionLab-Backend/
+            # ├── config/
+            # │   └── firebase_key.json
+            # └── services/
+            #
+            base_path = Path(__file__).resolve().parent.parent
 
         key_path = base_path / "config" / "firebase_key.json"
 

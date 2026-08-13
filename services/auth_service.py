@@ -4,8 +4,13 @@ Coordina los servicios de usuarios y criptografia; no accede a Firebase de
 forma directa ni implementa operaciones CRUD.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import TYPE_CHECKING, Optional
+
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import os
 
 import jwt
 
@@ -16,6 +21,7 @@ from services.crypto_service import CryptoService
 if TYPE_CHECKING:
     from services.user_service import UserService
 
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 
 class AuthService:
     """Autentica usuarios activos y emite tokens JWT."""
@@ -53,7 +59,12 @@ class AuthService:
             raise AuthenticationError("El usuario no tiene un identificador valido")
 
         self.user_service.update_last_login(uid)
-        self.user_service.log_activity(uid, "Inicio de sesión", target_uid=uid)
+        self.user_service.log_activity(
+            uid,
+            "Inicio de sesión",
+            target_uid=uid,
+            actor_info=user,
+        )
         return {
             "token": self.generate_token(user),
             "user": self._public_user(user),
@@ -116,3 +127,94 @@ class AuthService:
             for key, value in public_user.items()
             if key not in private_fields
         }
+
+    def forgot_password(self, email: str) -> dict:
+        try:
+            user = self.user_service.get_by_email(email)
+            if user:
+                uid = user.get("uid") or user.get("id")
+                now = datetime.now(timezone.utc)
+                payload = {
+                    "sub": uid,
+                    "email": email,
+                    "type": "password_reset",
+                    "iat": now,
+                    "exp": now + timedelta(minutes=15)
+                }
+
+                reset_token = jwt.encode(payload, self.jwt_secret, algorithm=JWT_ALGORITHM)
+                reset_link = f"{FRONTEND_URL}/#/reset-password?token={reset_token}"
+                correo_enviado = self.enviar_correo(email, reset_link)
+                
+                if correo_enviado:
+                    print(f"¡Correo enviado exitosamente a {email}!")
+                else:
+                    print(f"Falló el envío al correo {email}.")
+            
+        except Exception as e:
+            print(f"Error interno: {e}")
+            
+        return {"mensaje": "Si el correo existe en nuestro sistema, te enviamos las instrucciones."}
+
+    def reset_password(self, token: str, new_password: str) -> dict:
+        try:
+            # 1. Leemos el token
+            payload = jwt.decode(token, self.jwt_secret, algorithms=[JWT_ALGORITHM])
+            if payload.get("type") != "password_reset":
+                raise ValueError("El enlace no es válido para esta acción.")
+            
+            uid = payload.get("sub")
+            user = self.user_service.get_user(uid)
+            if not user:
+                raise ValueError("El usuario no existe.")
+
+            old_password_hash = user.get("password_hash")
+            if old_password_hash and self.crypto_service.verify_password(new_password, old_password_hash):
+                raise ValueError("La nueva contraseña no puede ser igual a la anterior.")
+
+            hashed_password = self.crypto_service.hash_password(new_password)
+            self.user_service.update_user(uid, {"password_hash": hashed_password})
+            
+            return {"mensaje": "Contraseña actualizada exitosamente."}
+
+        except jwt.ExpiredSignatureError:
+            raise ValueError("El enlace de recuperación ya expiró. Solicita uno nuevo.")
+        except jwt.InvalidTokenError:
+            raise ValueError("El enlace de recuperación es inválido o está corrupto.")
+        except ValueError as ve:
+            raise ve
+        except Exception as e:
+            raise ValueError("No se pudo actualizar la contraseña. Intenta de nuevo.")
+
+    def enviar_correo(self, destinatario: str, link: str) -> bool:
+        remitente = os.getenv("EMAIL_SENDER", "correo_por_defecto@gmail.com")
+        password = os.getenv("EMAIL_PASSWORD", "")
+        
+        msg = MIMEMultipart()
+        msg['From'] = f"Soporte EmotionLab <{remitente}>" 
+        msg['To'] = destinatario 
+        msg['Subject'] = "Recuperación de Contraseña - EmotionLab"
+        
+        cuerpo = f"""Hola,
+        
+Hemos recibido una solicitud para recuperar tu contraseña.
+Haz clic en el siguiente enlace para crear una nueva:
+
+{link}
+
+Si no fuiste tú, puedes ignorar este mensaje. El enlace caduca en 15 minutos.
+
+IMPORTANTE: El link debes abrirlo en el mismo dispositivo donde se encuentra el programa. TELÉFONOS CELULARES NO.
+"""
+        msg.attach(MIMEText(cuerpo, 'plain'))
+        
+        try:
+            server = smtplib.SMTP('smtp.gmail.com', 587)
+            server.starttls()
+            server.login(remitente, password)
+            server.send_message(msg)
+            server.quit()
+            return True
+        except Exception as e:
+            print(f"Error enviando correo: {e}")
+            return False
