@@ -97,18 +97,23 @@ class UserService:
 
     @staticmethod
     def public_user(user: dict) -> dict:
-        """Elimina credenciales antes de exponer un usuario."""
+        """Elimina credenciales antes de exponer un usuario y sanitiza fechas."""
 
         private_fields = {
             "password",
             "password_hash",
         }
 
-        return {
+        safe_user = {
             key: value
             for key, value in user.items()
             if key not in private_fields
         }
+
+        if "created_at" in safe_user:
+            safe_user["created_at"] = str(safe_user["created_at"])
+
+        return safe_user
 
     def list_public_users(self) -> List[dict]:
         return [
