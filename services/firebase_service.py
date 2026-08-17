@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from weakref import ref
 
@@ -5,9 +6,17 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 import sys
 
+
 class FirebaseService:
     """
     Servicio singleton para administrar Firestore.
+
+    Incluye logs de operaciones Firestore para auditoría en desarrollo.
+    - En entorno ``frozen`` (PyInstaller / marcha blanca): los logs se
+      desactivan por defecto a menos que FIRESTORE_LOGS=1.
+    - En desarrollo: los logs se activan por defecto y pueden apagarse
+      con FIRESTORE_LOGS=0.
+    NUNCA se imprimen datos sensibles (passwords, tokens, credenciales).
     """
 
     _instance = None
@@ -25,9 +34,28 @@ class FirebaseService:
 
         self.db = None
 
+        # -------------------------------------------------------------
+        # Configuración de logs de Firestore
+        # -------------------------------------------------------------
+        env_flag = os.getenv("FIRESTORE_LOGS")
+        if getattr(sys, "frozen", False):
+            # Producción / marcha blanca: OFF a menos que se indique explícitamente.
+            self._logs_enabled = env_flag in ("1", "true", "True", "TRUE")
+        else:
+            # Desarrollo: ON por defecto.
+            self._logs_enabled = env_flag not in ("0", "false", "False", "FALSE")
+
         self._initialize()
 
         self._initialized = True
+
+    # ------------------------------------------------------------------
+    # Helpers: Logs de operaciones
+    # ------------------------------------------------------------------
+    def _log(self, operacion: str, detalle: str) -> None:
+        if not self._logs_enabled:
+            return
+        print(f"[FIRESTORE] {operacion} {detalle}", flush=True)
 
     def _initialize(self):
         """
@@ -51,7 +79,7 @@ class FirebaseService:
             #
             # resources/
             # ├── backend/
-            # │   └── EmotionLabBackend.exe
+            # │   └── EmotionLabBackend.exe  <- sys.executable
             # └── config/
             #     └── firebase_key.json
             #
@@ -80,6 +108,7 @@ class FirebaseService:
         firebase_admin.initialize_app(cred)
 
         self.db = firestore.client()
+        self._log("INIT", f"Firestore client ready; config={key_path}")
 
     # ---------------------------------------------------------
     # Métodos genéricos
@@ -110,14 +139,14 @@ class FirebaseService:
         """
         Batch de escritura.
         """
-
+        self._log("BATCH", "new write batch created")
         return self.db.batch()
 
     def transaction(self):
         """
         Inicia una transacción.
         """
-
+        self._log("TX", "new transaction started")
         return self.db.transaction()
 
     # ---------------------------------------------------------
@@ -130,7 +159,7 @@ class FirebaseService:
         document_id: str,
         data: dict,
     ):
-
+        self._log("WRITE", f"SET {collection}/{document_id}")
         ref = self.document(collection, document_id)
 
         ref.set(data)
@@ -145,6 +174,7 @@ class FirebaseService:
         """
         Obtiene un documento.
         """
+        self._log("GET", f"{collection}/{document_id}")
 
         doc = self.document(collection, document_id).get()
 
@@ -162,6 +192,7 @@ class FirebaseService:
         """
         Actualiza un documento.
         """
+        self._log("UPDATE", f"{collection}/{document_id} fields={sorted(data.keys())}")
 
         self.document(collection, document_id).update(data)
 
@@ -173,6 +204,7 @@ class FirebaseService:
         """
         Elimina un documento.
         """
+        self._log("DELETE", f"{collection}/{document_id}")
 
         self.document(collection, document_id).delete()
 
@@ -182,7 +214,12 @@ class FirebaseService:
     ):
         """
         Lista todos los documentos de una colección.
+
+        ATENCIÓN: No usar esta operación para colecciones muy grandes en
+        marcha blanca; preferir ``query_documents`` con filtros y/o
+        paginación. Se deja aquí para backwards compatibility.
         """
+        self._log("STREAM", f"{collection} (all documents)")
 
         docs = self.collection(collection).stream()
 
@@ -208,6 +245,8 @@ class FirebaseService:
         """
         Consulta documentos usando un filtro.
         """
+        safe_value = "<multi>" if isinstance(value, (list, tuple, set)) else type(value).__name__
+        self._log("QUERY", f"{collection} where {field} {operator} ({safe_value})")
 
         docs = (
             self.collection(collection)
