@@ -60,6 +60,7 @@ python-dotenv==1.2.2
 pywin32-ctypes==0.2.3
 reportlab==5.0.0
 requests==2.34.2
+resend==2.36.0
 scikit-learn==1.9.0
 scipy==1.17.1
 setuptools==84.0.0
