@@ -1,3 +1,11 @@
-.env
+dist/
+build/
+*.exe
 __pycache__/
-*.py[cod]
+.env
+firebase_key.json
+
+# Agregado por seguridad
+venv/
+env/
+credentials/

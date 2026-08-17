@@ -1,90 +1,427 @@
 from flask import Blueprint, current_app, jsonify, request
 
-from core.exceptions import SessionNotFound
+from core.roles import ROLE_TEACHER
 from middleware.jwt_required import jwt_required
+from middleware.roles_required import roles_required
 
-sessions_bp = Blueprint("sessions", __name__, url_prefix="/sessions")
+
+sessions_bp = Blueprint(
+    "sessions",
+    __name__,
+    url_prefix="/sessions"
+)
 
 
 @sessions_bp.get("")
 @jwt_required
+@roles_required(ROLE_TEACHER)
 def list_sessions():
-    """Lista las sesiones almacenadas con filtros opcionales por fecha y estado."""
-    date_from = request.args.get("date_from")
-    date_to = request.args.get("date_to")
-    status = request.args.get("status")
-    session_service = current_app.extensions["services"]["session_service"]
-    return jsonify(
-        session_service.list_sessions(
-            date_from=date_from,
-            date_to=date_to,
-            status=status,
+
+    service = current_app.extensions[
+        "services"
+    ]["session_service"]
+
+    name = request.args.get(
+        "name"
+    )
+
+    if name is not None:
+
+        return jsonify([
+            _session_summary(item)
+            for item in service.search_by_name(
+                name
+            )
+        ])
+
+    fecha = (
+        request.args.get(
+            "date"
         )
-    ), 200
+        or request.args.get(
+            "fecha"
+        )
+    )
+
+    sessions = (
+        service.list_sessions_by_date(
+            fecha
+        )
+        if fecha
+        else service.list_sessions(
+            date_from=request.args.get(
+                "date_from"
+            ),
+
+            date_to=request.args.get(
+                "date_to"
+            ),
+
+            status=request.args.get(
+                "status"
+            ),
+        )
+    )
+
+    return jsonify([
+        _session_summary(
+            session
+        )
+        for session in sessions
+    ])
 
 
-@sessions_bp.get("/dates")
+@sessions_bp.get(
+    "/<session_id>"
+)
 @jwt_required
-def list_dates():
-    """Obtiene los días que tienen sesiones registradas."""
-    session_service = current_app.extensions["services"]["session_service"]
-    return jsonify(session_service.list_dates()), 200
+@roles_required(ROLE_TEACHER)
+def get_session(
+    session_id
+):
 
+    service = current_app.extensions[
+        "services"
+    ]["session_service"]
 
-@sessions_bp.get("/by-date/<fecha>")
-@jwt_required
-def list_by_date(fecha: str):
-    """Obtiene las sesiones asociadas a un día en concreto."""
-    session_service = current_app.extensions["services"]["session_service"]
-    return jsonify(session_service.list_sessions_by_date(fecha)), 200
+    session = service.get_session_detail(
+        session_id
+    )
 
+    if not session:
 
-@sessions_bp.get("/<session_id>")
-@jwt_required
-def get_session(session_id: str):
-    """Obtiene el detalle completo de una sesión por su ID."""
-    session_service = current_app.extensions["services"]["session_service"]
-    session = session_service.get_session_detail(session_id)
-    if session is None:
-        raise SessionNotFound("La sesión no existe")
-    return jsonify(session), 200
-
-
-@sessions_bp.patch("/<session_id>")
-@jwt_required
-def update_session(session_id: str):
-    """Actualiza datos manuales permitidos de la sesión (nombre, observaciones)."""
-    data = request.get_json(silent=True)
-    if data is None:
-        return jsonify({"error": "El cuerpo debe ser un JSON válido"}), 400
-    session_service = current_app.extensions["services"]["session_service"]
-    session_service.update_session(session_id, data)
-    return jsonify({"message": "Sesión actualizada correctamente"}), 200
-
-
-@sessions_bp.route("/import", methods=["POST"])
-@jwt_required
-def import_sessions_direct():
-    """Endpoint llamado por el frontend React al presionar 'Importar nuevas sesiones'."""
-    try:
-        services = current_app.extensions["services"]
-        import_service = services["import_service"]
-        aws_service = services.get("aws_service")
-
-        # 1. Si AWS está configurado y funcional, intenta la sincronización remota
-        if aws_service is not None:
-            result = import_service.import_from_aws(aws_service)
-            return jsonify(result), 200
-
-        # 2. Modo Solo-Firebase: sincroniza índices sin arrojar error
-        import_service.session_service.build_import_index()
         return jsonify({
-            "nuevas": 0,
-            "imported": 0,
-            "skipped_existing": [],
-            "mensaje": "Base de datos sincronizada correctamente con Firebase."
+            "error": "Sesion no encontrada"
+        }), 404
+
+    return jsonify({
+
+        "session_id": session.get(
+            "session_id"
+        ),
+
+        "nombre": session.get(
+            "nombre"
+        ),
+
+        "observaciones": session.get(
+            "observaciones"
+        ),
+
+        "estado": session.get(
+            "estado",
+            session.get(
+                "status"
+            )
+        ),
+
+        "status": session.get(
+            "status"
+        ),
+
+        "prediction": session.get(
+            "prediction"
+        ),
+
+        # ======================================================
+        # FECHA REAL
+        # ======================================================
+
+        "fecha": (
+            service._get_date(
+                session
+            )
+        ),
+
+        "hora": (
+            service._get_time(
+                session
+            )
+        ),
+
+        "edad": session.get(
+            "edad"
+        ),
+
+        "genero": session.get(
+            "genero"
+        ),
+
+        "difficulty": session.get(
+            "difficulty"
+        ),
+
+        "duracion_estimada": session.get(
+            "duracion_estimada",
+            False
+        ),
+
+        "prediction_error": session.get(
+            "prediction_error"
+        ),
+
+        "prediction_missing_fields": session.get(
+            "prediction_missing_fields",
+            []
+        ),
+
+        "raw_data": session.get(
+            "raw_json"
+        ),
+    })
+
+
+@sessions_bp.patch(
+    "/<session_id>"
+)
+@jwt_required
+@roles_required(ROLE_TEACHER)
+def update_session(
+    session_id
+):
+
+    body = request.get_json(
+        silent=True
+    ) or {}
+
+    current_app.extensions[
+        "services"
+    ]["session_service"].update_session(
+        session_id,
+        body
+    )
+
+    return jsonify({
+        "session_id": session_id,
+        "updated": True
+    })
+
+
+def _session_summary(
+    session
+):
+
+    service = current_app.extensions[
+        "services"
+    ]["session_service"]
+
+    prediction = (
+        session.get(
+            "prediction"
+        )
+        or {}
+    )
+
+    # ==========================================================
+    # FECHA/HORA REAL
+    # ==========================================================
+    #
+    # El servicio se encarga de buscar:
+    #
+    # fecha
+    # fecha_inicio
+    # raw_json.session_data.fechaInicio
+    # raw_json.s3_key
+    #
+    # ==========================================================
+
+    fecha = service._get_date(
+        session
+    )
+
+    hora = service._get_time(
+        session
+    )
+
+    return {
+
+        "session_id": session.get(
+            "session_id"
+        ),
+
+        "fecha": fecha,
+
+        "hora": hora,
+
+        "created_at": session.get(
+            "created_at"
+        ),
+
+        "updated_at": session.get(
+            "updated_at"
+        ),
+
+        "edad": session.get(
+            "edad"
+        ),
+
+        "genero": session.get(
+            "genero"
+        ),
+
+        "difficulty": session.get(
+            "difficulty"
+        ),
+
+        "bienestar": prediction.get(
+            "bienestar"
+        ),
+
+        "probabilidad": prediction.get(
+            "probabilidad"
+        ),
+
+        "confianza": prediction.get(
+            "confianza"
+        ),
+
+        "nombre": session.get(
+            "nombre"
+        ),
+
+        "estado": session.get(
+            "estado",
+            session.get(
+                "status"
+            )
+        ),
+
+        "status": session.get(
+            "status"
+        ),
+
+        "duracion_estimada": session.get(
+            "duracion_estimada",
+            False
+        ),
+
+        "prediction_error": session.get(
+            "prediction_error"
+        ),
+
+        "prediction_missing_fields": session.get(
+            "prediction_missing_fields",
+            []
+        ),
+    }
+
+
+@sessions_bp.post(
+    "/import"
+)
+@jwt_required
+@roles_required(ROLE_TEACHER)
+def import_sessions():
+
+    import_service = current_app.extensions[
+        "services"
+    ]["import_service"]
+
+    aws_service = current_app.extensions[
+        "services"
+    ]["aws_service"]
+
+    try:
+
+        result = (
+            import_service.import_from_aws(
+                aws_service
+            )
+        )
+
+        return jsonify(
+            result
+        ), 200
+
+    except ValueError as error:
+
+        return jsonify({
+            "error": str(error)
+        }), 400
+
+    except Exception:
+
+        current_app.logger.exception(
+            "Error importando sesiones desde AWS"
+        )
+
+        return jsonify({
+            "error": "No se pudieron importar las sesiones"
+        }), 500
+
+
+@sessions_bp.patch(
+    "/<session_id>/name"
+)
+@jwt_required
+@roles_required(ROLE_TEACHER)
+def update_session_name(
+    session_id
+):
+
+    body = request.get_json(
+        silent=True
+    ) or {}
+
+    nombre = body.get(
+        "nombre"
+    )
+
+    if nombre is None:
+
+        return jsonify({
+            "error": "El nombre es obligatorio"
+        }), 400
+
+    if not isinstance(
+        nombre,
+        str
+    ):
+
+        return jsonify({
+            "error": "El nombre debe ser texto"
+        }), 400
+
+    nombre = nombre.strip()
+
+    if not nombre:
+
+        return jsonify({
+            "error": "El nombre no puede estar vacío"
+        }), 400
+
+    try:
+
+        session_service = current_app.extensions[
+            "services"
+        ]["session_service"]
+
+        session_service.update_name(
+            session_id,
+            nombre
+        )
+
+        return jsonify({
+            "session_id": session_id,
+            "nombre": nombre,
+            "updated": True
         }), 200
 
     except Exception as error:
-        print(f"❌ Error en la importación directa de sesiones: {error}")
-        return jsonify({"error": "No se pudieron importar las sesiones.", "detalles": str(error)}), 500
+
+        current_app.logger.exception(
+            "Error actualizando nombre de sesión"
+        )
+
+        if (
+            "no existe"
+            in str(error).lower()
+        ):
+
+            return jsonify({
+                "error": "Sesión no encontrada"
+            }), 404
+
+        return jsonify({
+            "error": "No se pudo actualizar el nombre"
+        }), 500

@@ -1,3 +1,5 @@
+"""Punto de entrada y fábrica de la API Flask de EmotionLab."""
+
 from dotenv import load_dotenv
 from flask import Flask, jsonify
 from flask_cors import CORS
@@ -20,6 +22,18 @@ from routes.session_routes import sessions_bp
 from routes.user_routes import users_bp
 
 
+def _cors_origen_permitido(origin):
+    permitidos = {
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "null",
+        "",
+    }
+    if origin is None:
+        return True
+    return origin in permitidos
+
+
 def create_app(services: dict | None = None) -> Flask:
     """Construye la aplicación Flask."""
 
@@ -27,26 +41,20 @@ def create_app(services: dict | None = None) -> Flask:
 
     app.extensions["services"] = services or _build_services()
 
-    # Configuración limpia de CORS permitiendo orígenes de desarrollo local
     CORS(
         app,
         resources={
             r"/*": {
-                "origins": [
-                    "http://localhost:5173",
-                    "http://127.0.0.1:5173",
-                    "http://localhost:3000",
-                    "http://127.0.0.1:3000",
-                ],
+                "origins": ["http://localhost:5173", "http://127.0.0.1:5173"],
+                "always_send": True,
                 "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-                "allow_headers": ["Content-Type", "Authorization", "Access-Control-Allow-Origin"],
-                "supports_credentials": True,
+                "allow_headers": ["Content-Type", "Authorization"],
             }
-        },
+        }
     )
 
     @app.get("/health")
-    def health():
+    def health_check():  # <-- Faltaba definir la función
         return jsonify({"status": "healthy"})
 
     _register_error_handlers(app)
@@ -80,16 +88,9 @@ def _build_services() -> dict:
     session_service = SessionService()
     prediction_service = PredictionService()
 
-    # Manejo seguro para instanciar AWS solo si las claves existen en el .env
-    aws_service_instance = None
-    try:
-        aws_service_instance = AWSService()
-    except Exception as err:
-        print(f"⚠️ AWSService no inicializado (Modo Solo-Firebase activo): {err}")
-
     return {
         "crypto_service": crypto_service,
-        "aws_service": aws_service_instance,
+        "aws_service": AWSService(),
         "user_service": user_service,
         "auth_service": AuthService(
             user_service,
@@ -138,6 +139,6 @@ if __name__ == "__main__":
     app.run(
         host="127.0.0.1",
         port=5000,
-        debug=True,
+        debug=False,
         use_reloader=False,
     )
