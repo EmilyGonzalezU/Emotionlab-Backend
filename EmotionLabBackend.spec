@@ -14,23 +14,38 @@ hiddenimports += collect_submodules("pandas")
 hiddenimports += collect_submodules("passlib")
 hiddenimports += collect_submodules("bcrypt")
 
+# Flask y extras
+hiddenimports += collect_submodules("flask")
+hiddenimports += collect_submodules("flask_cors")
+hiddenimports += collect_submodules("openpyxl")
+hiddenimports += collect_submodules("reportlab")
+hiddenimports += collect_submodules("jwt")
+hiddenimports += collect_submodules("cryptography")
+hiddenimports += collect_submodules("dotenv")
+
 
 a = Analysis(
     ["app.py"],
     pathex=["."],
     binaries=[],
 
+    # IMPORTANTE: NUNCA incluir .env ni firebase_key.json dentro del
+    # ejecutable, porque son archivos de configuración con SECRETOS y
+    # deben poder cambiarse sin recompilar. Se copian externamente
+    # en resources/config/ por el instalador de Electron.
     datas=[
         ("ia/modelo_pipeline.pkl", "ia"),
-        ("config/firebase_key.json", "config"),
-        ("config/.env", "config"),
     ],
 
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        "tkinter",
+        "unittest",
+        "pytest",
+    ],
     noarchive=False,
 )
 
@@ -41,9 +56,8 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name="EmotionLabBackend",
     debug=False,
     bootloader_ignore_signals=False,
@@ -59,5 +73,6 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=True,
+    upx_exclude=[],
     name="EmotionLabBackend",
 )

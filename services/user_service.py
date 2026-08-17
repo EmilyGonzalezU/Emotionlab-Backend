@@ -6,7 +6,12 @@ from uuid import uuid4
 
 from core.constants import COLLECTION_USER_ACTIVITY, COLLECTION_USERS
 from core.roles import ROLE_ADMIN, ROLE_TEACHER, VALID_ROLES
-from services.cache_service import USER_CACHE, invalidate_user_cache
+from services.cache_service import (
+    ACTIVITY_CACHE,
+    USER_CACHE,
+    invalidate_activity_cache,
+    invalidate_user_cache,
+)
 from services.firebase_service import firebase
 
 
@@ -97,18 +102,23 @@ class UserService:
 
     @staticmethod
     def public_user(user: dict) -> dict:
-        """Elimina credenciales antes de exponer un usuario."""
+        """Elimina credenciales antes de exponer un usuario y sanitiza fechas."""
 
         private_fields = {
             "password",
             "password_hash",
         }
 
-        return {
+        safe_user = {
             key: value
             for key, value in user.items()
             if key not in private_fields
         }
+
+        if "created_at" in safe_user:
+            safe_user["created_at"] = str(safe_user["created_at"])
+
+        return safe_user
 
     def list_public_users(self) -> List[dict]:
         return [
@@ -290,6 +300,9 @@ class UserService:
             uuid4().hex,
             data,
         )
+        # Cada nueva entrada invalida la caché de listados para no devolver
+        # vistas obsoletas al admin.
+        invalidate_activity_cache()
 
     def list_activity(
         self,
@@ -299,10 +312,18 @@ class UserService:
         """
         Lista únicamente actividades administrativas válidas.
 
+        Usa ``ACTIVITY_CACHE`` para evitar leer la colección completa en
+        cada visita al panel (la actividad cambia sólo cuando el admin
+        crea/actualiza/elimina usuarios, normalmente pocas veces al día).
+
         Elimina el patrón N+1: ``actor_nombre`` y ``actor_email`` ya
         se persistieron al crear el log, por lo que no se vuelven a
         consultar los usuarios en Firestore.
         """
+        cache_key = ("activity", uid, limit)
+        cached = ACTIVITY_CACHE.get(cache_key)
+        if cached is not None:
+            return list(cached)
 
         allowed_actions = self._allowed_activity_actions()
 
@@ -327,10 +348,12 @@ class UserService:
         if limit is not None:
             activities = activities[:limit]
 
-        return [
+        enriched = [
             self._enrich_activity(activity)
             for activity in activities
         ]
+        ACTIVITY_CACHE.set(cache_key, list(enriched))
+        return enriched
 
     def _enrich_activity(
         self,

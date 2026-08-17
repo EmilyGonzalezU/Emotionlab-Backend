@@ -99,6 +99,11 @@ SESSION_CACHE = TTLCache(default_ttl_seconds=20, max_entries=64)
 # Clave: ("import_index",)
 IMPORT_INDEX_CACHE = TTLCache(default_ttl_seconds=300, max_entries=4)
 
+# Actividad administrativa: 120s TTL (cambia poco, sólo cuando el admin
+# crea/actualiza/elimina usuarios).
+# Clave: ("activity", uid_or_None, limit_or_None)
+ACTIVITY_CACHE = TTLCache(default_ttl_seconds=120, max_entries=32)
+
 
 # ----------------------------------------------------------------------
 # Helpers de invalidación.
@@ -114,3 +119,8 @@ def invalidate_user_cache(uid: Optional[str] = None) -> None:
 def invalidate_sessions_cache() -> None:
     SESSION_CACHE.invalidate_pattern(lambda k: isinstance(k, tuple) and k and k[0] == "sessions")
     IMPORT_INDEX_CACHE.invalidate_pattern(lambda k: isinstance(k, tuple) and k and k[0] == "import_index")
+
+
+def invalidate_activity_cache() -> None:
+    """Invalida TODO el caché de actividad administrativa."""
+    ACTIVITY_CACHE.invalidate_pattern(lambda k: isinstance(k, tuple) and k and k[0] == "activity")
