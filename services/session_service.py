@@ -219,15 +219,28 @@ class SessionService:
         Lista todas las sesiones de un día.
 
         Combina:
-        - sesiones con fecha normalizada
-        - sesiones antiguas con fecha_inicio
-        - sesiones cuya fecha solamente existe en raw_json
-        - sesiones genéricas cuya fecha/hora está en s3_key
+        - sesiones con fecha normalizada (query directo, barato)
+        - sesiones antiguas con fecha_inicio / raw_json / s3_key
+
+        Optimizaciones respecto a la versión anterior:
+        1. No recorre TODA la colección con list_documents() directamente;
+           utiliza list_sessions() que se sirve de SESSION_CACHE (~20s TTL)
+           y a su vez filtra por status cuando es posible.
+        2. Cachea este resultado por fecha para no repetir lecturas si el
+           usuario abre/cierra el listado varias veces en pocos segundos.
         """
         self._validate_date(fecha)
 
         # ==========================================================
-        # RESULTADOS DIRECTOS
+        # CACHÉ ESPECÍFICO POR FECHA
+        # ==========================================================
+        cache_key = ("sessions_by_date", fecha)
+        cached = SESSION_CACHE.get(cache_key)
+        if isinstance(cached, list):
+            return [dict(item) for item in cached]
+
+        # ==========================================================
+        # 1. RESULTADOS DIRECTOS (sesiones modernas con campo 'fecha')
         # ==========================================================
         exact_match = self.firebase.query_documents(
             collection=self.collection,
@@ -241,15 +254,23 @@ class SessionService:
         }
 
         # ==========================================================
-        # REVISAR TODAS LAS SESIONES
+        # 2. COMPATIBILIDAD HACIA ATRÁS
+        #    (sesiones antiguas con fecha dentro de raw_json / source_key)
+        #
+        #    Reutilizamos list_sessions() en lugar de list_documents()
+        #    para aprovechar SESSION_CACHE y evitar una lectura full
+        #    duplicada de la colección si este listado ya se consultó
+        #    hace poco (ej. panel principal).
         # ==========================================================
-        all_sessions = self.firebase.list_documents(self.collection)
+        all_sessions = self.list_sessions()
 
         for session in all_sessions:
             if self._get_date(session) == fecha:
                 combined[self._session_unique_key(session)] = session
 
-        return sorted(combined.values(), key=self._date_time_sort_key, reverse=True)
+        result = sorted(combined.values(), key=self._date_time_sort_key, reverse=True)
+        SESSION_CACHE.set(cache_key, [dict(item) for item in result], ttl_seconds=60)
+        return result
 
     def list_dates(self) -> list[str]:
         return sorted(
