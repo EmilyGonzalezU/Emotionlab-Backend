@@ -56,19 +56,41 @@ class SessionParser:
     # =========================================================
 
     def _parse_date(self, value):
-        if not value:
+        if value is None:
             return None
+
+        # Soporte para epoch timestamps (segundos o milisegundos)
+        if isinstance(value, (int, float)):
+            try:
+                if value > 1e11:  # Milisegundos
+                    value = value / 1000.0
+                return datetime.fromtimestamp(value)
+            except (ValueError, OSError):
+                return None
 
         value = str(value).strip()
 
         if not value:
             return None
 
+        # Limpiar sufijo de zona horaria UTC si existe
+        if value.endswith("Z"):
+            value = value[:-1]
+
+        # Eliminar offset de timezone simple si está presente (+00:00)
+        if "+" in value:
+            value = value.split("+")[0]
+
         formats = (
             "%Y-%m-%d %H:%M:%S",
             "%Y-%m-%d %H:%M:%S.%f",
             "%Y-%m-%dT%H:%M:%S",
             "%Y-%m-%dT%H:%M:%S.%f",
+            "%Y-%m-%d",
+            "%d-%m-%Y %H:%M:%S",
+            "%d-%m-%Y",
+            "%d/%m/%Y %H:%M:%S",
+            "%d/%m/%Y",
         )
 
         for fmt in formats:
@@ -81,21 +103,46 @@ class SessionParser:
 
     def get_start_date(self):
         """
-        Obtiene la fecha de inicio de la sesión.
+        Obtiene la fecha de inicio de la sesión buscando en múltiples
+        variantes de nombres y fallbacks de eventos.
         """
-
-        return self._parse_date(
-            self.session.get("fechaInicio")
+        # 1. Buscar en session_data
+        keys_to_check = (
+            "fechaInicio",
+            "fecha_inicio",
+            "fecha",
+            "timestamp",
+            "date",
+            "start_time",
+            "startTime",
+            "createdAt",
+            "created_at",
         )
+        for key in keys_to_check:
+            parsed = self._parse_date(self.session.get(key))
+            if parsed is not None:
+                return parsed
+
+        # 2. Buscar en la raíz del record
+        for key in keys_to_check:
+            parsed = self._parse_date(self.record.get(key))
+            if parsed is not None:
+                return parsed
+
+        # 3. Fallback al timestamp del primer evento o respuesta
+        for item in (*self.events, *self.answers):
+            if isinstance(item, Mapping):
+                timestamp = item.get("timestamp") or item.get("fecha") or item.get("date")
+                parsed = self._parse_date(timestamp)
+                if parsed is not None:
+                    return parsed
+
+        return None
 
     def _get_completed_event_timestamp(self):
         """
         Busca un evento que indique que la sesión terminó.
-
-        Se aceptan varias formas para hacer el parser más tolerante
-        con pequeñas diferencias provenientes de Unity.
         """
-
         eventos_finalizacion = {
             "session_completed",
             "session_complete",
@@ -140,16 +187,15 @@ class SessionParser:
         Obtiene la fecha de término.
 
         Prioridad:
-        1. fechaFin
+        1. fechaFin (o variantes)
         2. evento de finalización
+        3. última actividad
         """
-
-        fecha_fin = self._parse_date(
-            self.session.get("fechaFin")
-        )
-
-        if fecha_fin is not None:
-            return fecha_fin
+        keys_fin = ("fechaFin", "fecha_fin", "end_time", "endTime")
+        for key in keys_fin:
+            fecha_fin = self._parse_date(self.session.get(key))
+            if fecha_fin is not None:
+                return fecha_fin
 
         completed = self._get_completed_event_timestamp()
         if completed is not None:
@@ -173,6 +219,7 @@ class SessionParser:
     def has_real_end_date(self):
         return (
             self._parse_date(self.session.get("fechaFin")) is not None
+            or self._parse_date(self.session.get("fecha_fin")) is not None
             or self._get_completed_event_timestamp() is not None
         )
 
@@ -239,7 +286,7 @@ class SessionParser:
     def get_age(self):
         age = self._answer("edad")
 
-        # Si Unity no envió edad, usamos 14 como valor por defecto
+        # Si Unity no envió edad, usamos DEFAULT_AGE como valor por defecto
         if age is None:
             return self.DEFAULT_AGE
 
@@ -296,6 +343,7 @@ class SessionParser:
             return self.DEFAULT_GENDER
 
         return self._normalize_gender(gender)
+
     # =========================================================
     # DIFICULTAD
     # =========================================================
