@@ -1,5 +1,4 @@
 import json
-from copy import deepcopy
 from uuid import uuid4
 from typing import (
     Any,
@@ -57,8 +56,7 @@ class ImportService:
             "retried_pending": [],
         }
 
-        # Evita el patrón N+1: una sincronización consulta las sesiones
-        # existentes una vez y reutiliza ese índice para todo el lote AWS.
+        # Consulta sesiones existentes una vez para todo el lote
         existing_by_source_key, existing_by_session_id = self.session_service.build_import_index()
 
         def _track_saved(sid: str, skey: Optional[str], st: str):
@@ -71,29 +69,18 @@ class ImportService:
             source_key = record.get("s3_key")
             unity_session_id = self._get_unity_session_id(record)
 
-            # -------------------------------------------------
             # 1. Buscar por s3_key
-            # -------------------------------------------------
             existing = existing_by_source_key.get(source_key) if source_key else None
 
-            # -------------------------------------------------
-            # 2. Si no encontramos por s3_key,
-            #    buscar por session_id
-            # -------------------------------------------------
+            # 2. Si no encontramos por s3_key, buscar por session_id
             if existing is None and unity_session_id:
                 existing = existing_by_session_id.get(unity_session_id)
 
-            # -------------------------------------------------
             # 3. SESIÓN YA EXISTENTE
-            # -------------------------------------------------
             if existing:
                 existing_status = existing.get("status") or existing.get("estado")
                 session_id = existing.get("session_id") or existing.get("id") or unity_session_id
 
-                # ---------------------------------------------
-                # Si está pendiente de predicción,
-                # volver a intentar
-                # ---------------------------------------------
                 if existing_status == STATUS_PENDING_PREDICTION:
                     retry_result = self._retry_prediction(session_id, record)
 
@@ -106,26 +93,19 @@ class ImportService:
                         result["import_errors"].append(session_id)
                     continue
 
-                # ---------------------------------------------
-                # Si ya existe y no está pendiente,
-                # NO tocarla
-                # ---------------------------------------------
                 result["skipped_existing"].append(session_id)
                 continue
 
-            # -------------------------------------------------
             # 4. NUEVA SESIÓN
-            # -------------------------------------------------
             session_id = self._session_id(record)
             result["new"].append(session_id)
 
+            parser = None
             try:
                 parser = SessionParser(record)
                 prediction_status = parser.get_prediction_status()
 
-                # -------------------------------------------------
                 # 5. Sesión incompleta
-                # -------------------------------------------------
                 if not prediction_status["can_predict"]:
                     self._create_pending_prediction(
                         session_id, record, result, parser, prediction_status
@@ -133,24 +113,16 @@ class ImportService:
                     _track_saved(session_id, source_key, STATUS_PENDING_PREDICTION)
                     continue
 
-                # -------------------------------------------------
                 # 6. Obtener features
-                # -------------------------------------------------
                 features = parser.get_prediction_features()
 
-                # -------------------------------------------------
                 # 7. Ejecutar modelo
-                # -------------------------------------------------
                 prediction = self._predict(features)
 
-                # -------------------------------------------------
                 # 8. Datos del dashboard
-                # -------------------------------------------------
                 summary = parser.get_dashboard_summary()
 
-                # -------------------------------------------------
                 # 9. Guardar sesión
-                # -------------------------------------------------
                 self.session_service.create_session(
                     session_id,
                     record,
@@ -174,7 +146,7 @@ class ImportService:
                     session_id,
                     record,
                     result,
-                    parser if "parser" in locals() else None,
+                    parser,
                     {
                         "can_predict": False,
                         "missing_fields": [],
@@ -209,9 +181,6 @@ class ImportService:
             parser = SessionParser(record)
             prediction_status = parser.get_prediction_status()
 
-            # -------------------------------------------------
-            # Sigue incompleta
-            # -------------------------------------------------
             if not prediction_status["can_predict"]:
                 self.session_service.update_document_if_supported(
                     session_id,
@@ -222,9 +191,6 @@ class ImportService:
                 )
                 return "pending"
 
-            # -------------------------------------------------
-            # Ya está completa
-            # -------------------------------------------------
             features = parser.get_prediction_features()
             prediction = self._predict(features)
             summary = parser.get_dashboard_summary()
@@ -262,11 +228,11 @@ class ImportService:
         prediction_status: Optional[dict] = None,
     ) -> None:
         try:
-            parser = parser or SessionParser(record)
-            summary = parser.get_dashboard_summary()
+            active_parser = parser or SessionParser(record)
+            summary = active_parser.get_dashboard_summary()
 
             if prediction_status is None:
-                prediction_status = parser.get_prediction_status()
+                prediction_status = active_parser.get_prediction_status()
 
             self.session_service.create_session(
                 session_id,
@@ -351,11 +317,12 @@ class ImportService:
         else:
             raise ValueError("El lote debe ser un objeto JSON o una lista de sesiones")
 
+        # Conversión directa y ligera sin clonación profunda innecesaria
         normalized_sessions = []
         for session in sessions:
             if not isinstance(session, Mapping):
                 raise ValueError("Cada entrada del lote debe ser un objeto JSON")
-            normalized_sessions.append(deepcopy(dict(cast(Mapping[str, Any], session))))
+            normalized_sessions.append(dict(cast(Mapping[str, Any], session)))
 
         return normalized_sessions
 
@@ -365,9 +332,7 @@ class ImportService:
 
     @staticmethod
     def _session_id(record: Mapping[str, Any]) -> str:
-        # Primero conservar el ID de Unity
         if unity_id := ImportService._get_unity_session_id(record):
             return unity_id
 
-        # Solo si Unity no entregó ID, generar uno nuevo.
         return f"session_{uuid4().hex}"
