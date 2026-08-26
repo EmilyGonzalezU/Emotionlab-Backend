@@ -10,9 +10,8 @@ Su responsabilidad es:
 """
 
 import re
-from copy import deepcopy
 from datetime import datetime
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional
 
 from core.exceptions import SessionParseError
 
@@ -23,39 +22,99 @@ class SessionParser:
     DEFAULT_AGE = 15
     DEFAULT_GENDER = "Prefiero no decir"
 
+    DATE_FORMATS = (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M:%S.%f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%Y-%m-%d",
+        "%d-%m-%Y %H:%M:%S",
+        "%d-%m-%Y",
+        "%d/%m/%Y %H:%M:%S",
+        "%d/%m/%Y",
+    )
+
+    EVENTOS_FINALIZACION = {
+        "session_completed",
+        "session_complete",
+        "session_finished",
+        "session_finish",
+        "session_ended",
+        "session_end",
+        "game_completed",
+        "game_finished",
+    }
+
+    ESCENAS_EXCLUIDAS = {
+        "waiting_room_inicial",
+        "waiting_room",
+        "retroalimentacion",
+        "retroalimentacion_final",
+    }
+
+    ESCENAS_VALIDAS = {
+        "aula",
+        "oficina",
+        "consulta_virtual",
+    }
+
+    GENDER_MAPPING = {
+        "M": "Masculino",
+        "F": "Femenino",
+        "NB": "No binario",
+        "Masculino": "Masculino",
+        "Femenino": "Femenino",
+        "Hombre": "Masculino",
+        "Mujer": "Femenino",
+        "No binario": "No binario",
+        "Prefiero no decir": "Prefiero no decir",
+    }
+
+    DIFFICULTY_MAPPING = {
+        "facil": "facil",
+        "fácil": "facil",
+        "medio": "medio",
+        "dificil": "dificil",
+        "difícil": "dificil",
+    }
+
     def __init__(self, record: Mapping[str, Any]):
         if not isinstance(record, Mapping):
             raise SessionParseError("El registro debe ser un objeto JSON")
 
-        self.record = deepcopy(dict(record))
+        self.record = dict(record)
+        session_data = self.record.get("session_data", {})
 
-        self.session = self.record.get("session_data", {})
+        if not isinstance(session_data, Mapping):
+            raise SessionParseError("session_data debe ser un objeto JSON")
 
-        if not isinstance(self.session, Mapping):
-            raise SessionParseError(
-                "session_data debe ser un objeto JSON"
-            )
-
-        self.session = deepcopy(dict(self.session))
-
+        self.session = dict(session_data)
         self.answers = self.session.get("respuestas", [])
         self.events = self.session.get("eventos", [])
 
         if not isinstance(self.answers, list):
-            raise SessionParseError(
-                "respuestas debe ser una lista"
-            )
+            raise SessionParseError("respuestas debe ser una lista")
 
         if not isinstance(self.events, list):
-            raise SessionParseError(
-                "eventos debe ser una lista"
-            )
+            raise SessionParseError("eventos debe ser una lista")
+
+        # Cachés en memoria por instancia
+        self._cached_start_date: Optional[datetime] = None
+        self._start_date_computed = False
+
+        self._cached_end_date: Optional[datetime] = None
+        self._end_date_computed = False
+
+        self._cached_last_activity: Optional[datetime] = None
+        self._last_activity_computed = False
+
+        self._answers_map: Optional[dict] = None
 
     # =========================================================
     # FECHAS
     # =========================================================
 
-    def _parse_date(self, value):
+    def _parse_date(self, value) -> Optional[datetime]:
         if value is None:
             return None
 
@@ -68,45 +127,33 @@ class SessionParser:
             except (ValueError, OSError):
                 return None
 
-        value = str(value).strip()
-
-        if not value:
+        value_str = str(value).strip()
+        if not value_str:
             return None
 
-        # Limpiar sufijo de zona horaria UTC si existe
-        if value.endswith("Z"):
-            value = value[:-1]
+        # Intento rápido con fromisoformat (estándar ISO moderno)
+        clean_iso = value_str.rstrip("Z")
+        if "+" in clean_iso:
+            clean_iso = clean_iso.split("+")[0]
 
-        # Eliminar offset de timezone simple si está presente (+00:00)
-        if "+" in value:
-            value = value.split("+")[0]
+        try:
+            return datetime.fromisoformat(clean_iso)
+        except ValueError:
+            pass
 
-        formats = (
-            "%Y-%m-%d %H:%M:%S",
-            "%Y-%m-%d %H:%M:%S.%f",
-            "%Y-%m-%dT%H:%M:%S",
-            "%Y-%m-%dT%H:%M:%S.%f",
-            "%Y-%m-%d",
-            "%d-%m-%Y %H:%M:%S",
-            "%d-%m-%Y",
-            "%d/%m/%Y %H:%M:%S",
-            "%d/%m/%Y",
-        )
-
-        for fmt in formats:
+        for fmt in self.DATE_FORMATS:
             try:
-                return datetime.strptime(value, fmt)
+                return datetime.strptime(clean_iso, fmt)
             except ValueError:
                 continue
 
         return None
 
-    def get_start_date(self):
-        """
-        Obtiene la fecha de inicio de la sesión buscando en múltiples
-        variantes de nombres y fallbacks de eventos.
-        """
-        # 1. Buscar en session_data
+    def get_start_date(self) -> Optional[datetime]:
+        """Obtiene la fecha de inicio de la sesión con caché en memoria."""
+        if self._start_date_computed:
+            return self._cached_start_date
+
         keys_to_check = (
             "fechaInicio",
             "fecha_inicio",
@@ -118,15 +165,21 @@ class SessionParser:
             "createdAt",
             "created_at",
         )
+
+        # 1. Buscar en session_data
         for key in keys_to_check:
             parsed = self._parse_date(self.session.get(key))
             if parsed is not None:
+                self._cached_start_date = parsed
+                self._start_date_computed = True
                 return parsed
 
         # 2. Buscar en la raíz del record
         for key in keys_to_check:
             parsed = self._parse_date(self.record.get(key))
             if parsed is not None:
+                self._cached_start_date = parsed
+                self._start_date_computed = True
                 return parsed
 
         # 3. Fallback al timestamp del primer evento o respuesta
@@ -135,27 +188,17 @@ class SessionParser:
                 timestamp = item.get("timestamp") or item.get("fecha") or item.get("date")
                 parsed = self._parse_date(timestamp)
                 if parsed is not None:
+                    self._cached_start_date = parsed
+                    self._start_date_computed = True
                     return parsed
 
+        self._cached_start_date = None
+        self._start_date_computed = True
         return None
 
-    def _get_completed_event_timestamp(self):
-        """
-        Busca un evento que indique que la sesión terminó.
-        """
-        eventos_finalizacion = {
-            "session_completed",
-            "session_complete",
-            "session_finished",
-            "session_finish",
-            "session_ended",
-            "session_end",
-            "game_completed",
-            "game_finished",
-        }
-
+    def _get_completed_event_timestamp(self) -> Optional[datetime]:
+        """Busca un evento que indique que la sesión terminó."""
         for event in reversed(self.events):
-
             if not isinstance(event, Mapping):
                 continue
 
@@ -166,7 +209,7 @@ class SessionParser:
                 or ""
             ).strip().lower()
 
-            if event_name not in eventos_finalizacion:
+            if event_name not in self.EVENTOS_FINALIZACION:
                 continue
 
             timestamp = (
@@ -176,35 +219,40 @@ class SessionParser:
             )
 
             parsed_timestamp = self._parse_date(timestamp)
-
             if parsed_timestamp is not None:
                 return parsed_timestamp
 
         return None
 
-    def get_end_date(self):
-        """
-        Obtiene la fecha de término.
+    def get_end_date(self) -> Optional[datetime]:
+        """Obtiene la fecha de término con caché."""
+        if self._end_date_computed:
+            return self._cached_end_date
 
-        Prioridad:
-        1. fechaFin (o variantes)
-        2. evento de finalización
-        3. última actividad
-        """
         keys_fin = ("fechaFin", "fecha_fin", "end_time", "endTime")
         for key in keys_fin:
             fecha_fin = self._parse_date(self.session.get(key))
             if fecha_fin is not None:
+                self._cached_end_date = fecha_fin
+                self._end_date_computed = True
                 return fecha_fin
 
         completed = self._get_completed_event_timestamp()
         if completed is not None:
+            self._cached_end_date = completed
+            self._end_date_computed = True
             return completed
 
-        return self._get_last_activity_timestamp()
+        last_act = self._get_last_activity_timestamp()
+        self._cached_end_date = last_act
+        self._end_date_computed = True
+        return last_act
 
-    def _get_last_activity_timestamp(self):
-        """Obtiene la ultima actividad valida para estimar el fin."""
+    def _get_last_activity_timestamp(self) -> Optional[datetime]:
+        """Obtiene la última actividad válida para estimar el fin."""
+        if self._last_activity_computed:
+            return self._cached_last_activity
+
         timestamps = []
         start = self.get_start_date()
         for item in (*self.events, *self.answers):
@@ -214,131 +262,98 @@ class SessionParser:
             parsed = self._parse_date(timestamp)
             if parsed is not None and (start is None or parsed > start):
                 timestamps.append(parsed)
-        return max(timestamps) if timestamps else None
 
-    def has_real_end_date(self):
+        result = max(timestamps) if timestamps else None
+        self._cached_last_activity = result
+        self._last_activity_computed = True
+        return result
+
+    def has_real_end_date(self) -> bool:
         return (
             self._parse_date(self.session.get("fechaFin")) is not None
             or self._parse_date(self.session.get("fecha_fin")) is not None
             or self._get_completed_event_timestamp() is not None
         )
 
-    def has_estimated_end_date(self):
+    def has_estimated_end_date(self) -> bool:
         return not self.has_real_end_date() and self._get_last_activity_timestamp() is not None
 
     # =========================================================
     # DURACIÓN
     # =========================================================
 
-    def _calculate_duration(self):
+    def _calculate_duration(self) -> int:
         start = self.get_start_date()
         end = self.get_end_date()
 
         if start is None:
-            raise ValueError(
-                "Fecha de inicio inexistente"
-            )
+            raise ValueError("Fecha de inicio inexistente")
 
         if end is None:
-            raise ValueError(
-                "La sesión aún no terminó."
-            )
+            raise ValueError("La sesión aún no terminó.")
 
-        seconds = int(
-            (end - start).total_seconds()
-        )
+        seconds = int((end - start).total_seconds())
 
         if seconds <= 0:
-            raise ValueError(
-                "Duración inválida."
-            )
+            raise ValueError("Duración inválida.")
 
         return seconds
 
-    def get_duration(self):
+    def get_duration(self) -> int:
         return self._calculate_duration()
 
     # =========================================================
     # RESPUESTAS
     # =========================================================
 
-    def _answer(self, question):
-        question = str(question).strip().lower()
+    def _get_answers_map(self) -> dict:
+        if self._answers_map is None:
+            mapping = {}
+            for answer in self.answers:
+                if isinstance(answer, Mapping):
+                    qid = str(answer.get("idPregunta", "")).strip().lower()
+                    if qid:
+                        mapping[qid] = answer.get("respuestaLabel")
+            self._answers_map = mapping
+        return self._answers_map
 
-        for answer in self.answers:
-
-            if not isinstance(answer, Mapping):
-                continue
-
-            current = str(
-                answer.get("idPregunta", "")
-            ).strip().lower()
-
-            if current == question:
-                return answer.get("respuestaLabel")
-
-        return None
+    def _answer(self, question: str):
+        return self._get_answers_map().get(str(question).strip().lower())
 
     # =========================================================
     # EDAD
     # =========================================================
 
-    def get_age(self):
+    def get_age(self) -> int:
         age = self._answer("edad")
 
-        # Si Unity no envió edad, usamos DEFAULT_AGE como valor por defecto
         if age is None:
             return self.DEFAULT_AGE
 
-        age = re.sub(r"\D", "", str(age))
+        age_digits = re.sub(r"\D", "", str(age))
 
-        if not age:
+        if not age_digits:
             return self.DEFAULT_AGE
 
-        age = int(age)
-
-        return age
+        return int(age_digits)
 
     # =========================================================
     # GÉNERO
     # =========================================================
 
-    def _normalize_gender(self, value):
-
-        mapping = {
-            "M": "Masculino",
-            "F": "Femenino",
-            "NB": "No binario",
-
-            "Masculino": "Masculino",
-            "Femenino": "Femenino",
-
-            "Hombre": "Masculino",
-            "Mujer": "Femenino",
-
-            "No binario": "No binario",
-            "Prefiero no decir": "Prefiero no decir",
-        }
-
+    def _normalize_gender(self, value) -> str:
         if value is None:
             return self.DEFAULT_GENDER
 
-        normalized = str(
-            value
-        ).strip()
+        normalized = str(value).strip()
+        return self.GENDER_MAPPING.get(normalized, self.DEFAULT_GENDER)
 
-        if not normalized or normalized not in mapping:
-            return self.DEFAULT_GENDER
-
-        return mapping[normalized]
-
-    def get_gender(self):
+    def get_gender(self) -> str:
         gender = self._answer("genero")
 
         if gender is None:
             gender = self.session.get("genero")
 
-        # Si Unity no envió género, usamos la categoría neutral
         if gender is None or not str(gender).strip():
             return self.DEFAULT_GENDER
 
@@ -348,54 +363,28 @@ class SessionParser:
     # DIFICULTAD
     # =========================================================
 
-    def _normalize_difficulty(self, value):
-
+    def _normalize_difficulty(self, value) -> str:
         if value is None:
-            raise ValueError(
-                "Dificultad inexistente"
-            )
+            raise ValueError("Dificultad inexistente")
 
-        value = str(
-            value
-        ).strip().lower()
+        val_cleaned = str(value).strip().lower()
+        if val_cleaned not in self.DIFFICULTY_MAPPING:
+            raise ValueError(f"Dificultad inválida: {value}")
 
-        mapping = {
-            "facil": "facil",
-            "fácil": "facil",
+        return self.DIFFICULTY_MAPPING[val_cleaned]
 
-            "medio": "medio",
-
-            "dificil": "dificil",
-            "difícil": "dificil",
-        }
-
-        if value not in mapping:
-            raise ValueError(
-                f"Dificultad inválida: {value}"
-            )
-
-        return mapping[value]
-
-    def get_difficulty(self):
-
-        return self._normalize_difficulty(
-            self.session.get(
-                "difficulty_level"
-            )
-        )
+    def get_difficulty(self) -> str:
+        return self._normalize_difficulty(self.session.get("difficulty_level"))
 
     # =========================================================
     # HORA
     # =========================================================
 
-    def get_hour(self):
-
+    def get_hour(self) -> int:
         start_date = self.get_start_date()
 
         if start_date is None:
-            raise ValueError(
-                "Fecha de inicio inexistente"
-            )
+            raise ValueError("Fecha de inicio inexistente")
 
         return start_date.hour
 
@@ -403,14 +392,11 @@ class SessionParser:
     # DÍA DE LA SEMANA
     # =========================================================
 
-    def get_weekday(self):
-
+    def get_weekday(self) -> int:
         start_date = self.get_start_date()
 
         if start_date is None:
-            raise ValueError(
-                "Fecha de inicio inexistente"
-            )
+            raise ValueError("Fecha de inicio inexistente")
 
         return start_date.weekday()
 
@@ -418,74 +404,42 @@ class SessionParser:
     # INTENTOS
     # =========================================================
 
-    def get_attempts(self):
+    def get_attempts(self) -> int:
         return 1
 
     # =========================================================
     # ESCENA
     # =========================================================
 
-    def get_scene(self):
-        """
-        Obtiene una escena válida para el modelo.
-
-        Las escenas de espera y retroalimentación no representan
-        la escena principal de la sesión, por lo que se ignoran.
-        """
-
-        escenas_excluidas = {
-            "waiting_room_inicial",
-            "waiting_room",
-            "retroalimentacion",
-            "retroalimentacion_final",
-        }
-
-        escenas_validas = {
-            "aula",
-            "oficina",
-            "consulta_virtual",
-        }
-
-        # Recorremos las respuestas buscando una escena válida
+    def get_scene(self) -> str:
         for answer in self.answers:
-
             if not isinstance(answer, Mapping):
                 continue
 
             scene = answer.get("escena")
-
             if not scene:
                 continue
 
-            scene = str(scene).strip().lower()
-
-            # Ignorar escenas que no representan la actividad principal
-            if scene in escenas_excluidas:
+            scene_str = str(scene).strip().lower()
+            if scene_str in self.ESCENAS_EXCLUIDAS:
                 continue
 
-            # Si encontramos una escena que el modelo conoce
-            if scene in escenas_validas:
-                return scene
+            if scene_str in self.ESCENAS_VALIDAS:
+                return scene_str
 
-        # Revisar la escena directamente en session_data
         session_scene = self.session.get("escena")
-
         if session_scene:
-            session_scene = str(session_scene).strip().lower()
+            session_scene_str = str(session_scene).strip().lower()
+            if session_scene_str in self.ESCENAS_VALIDAS:
+                return session_scene_str
 
-            if session_scene in escenas_validas:
-                return session_scene
-
-        # Si no existe una escena válida, usamos la escena
-        # predeterminada del sistema.
         return "consulta_virtual"
 
     # =========================================================
     # FEATURES
     # =========================================================
 
-    def get_prediction_features(self):
-
+    def get_prediction_features(self) -> dict:
         return {
             "edad": self.get_age(),
             "hora": self.get_hour(),
@@ -501,25 +455,14 @@ class SessionParser:
     # VALIDACIÓN DE PREDICCIÓN
     # =========================================================
 
-    def get_prediction_missing_fields(self):
-        """
-        Devuelve una lista con los datos que faltan para poder
-        ejecutar el modelo.
-
-        NO inventa información.
-        """
-
+    def get_prediction_missing_fields(self) -> list[str]:
         missing = []
 
         if self.get_start_date() is None:
-            missing.append(
-                "fechaInicio"
-            )
+            missing.append("fechaInicio")
 
         if self.get_end_date() is None:
-            missing.append(
-                "fechaFin/session_completed/actividad"
-            )
+            missing.append("fechaFin/session_completed/actividad")
 
         try:
             self.get_age()
@@ -543,26 +486,17 @@ class SessionParser:
 
         return missing
 
-    def can_predict(self):
+    def can_predict(self) -> bool:
+        return len(self.get_prediction_missing_fields()) == 0
 
-        return len(
-            self.get_prediction_missing_fields()
-        ) == 0
-
-    def get_prediction_status(self):
-
-        missing = (
-            self.get_prediction_missing_fields()
-        )
+    def get_prediction_status(self) -> dict:
+        missing = self.get_prediction_missing_fields()
 
         if missing:
             return {
                 "can_predict": False,
                 "missing_fields": missing,
-                "reason": (
-                    "Faltan datos requeridos "
-                    "para ejecutar la predicción"
-                ),
+                "reason": "Faltan datos requeridos para ejecutar la predicción",
             }
 
         return {
@@ -575,33 +509,17 @@ class SessionParser:
     # DASHBOARD
     # =========================================================
 
-    def get_dashboard_summary(self):
-
+    def get_dashboard_summary(self) -> dict:
         start_date = self.get_start_date()
         end_date = self.get_end_date()
 
         return {
-            "fecha": (
-                start_date.strftime("%Y-%m-%d")
-                if start_date
-                else None
-            ),
-
-            "hora": (
-                start_date.strftime("%H:%M")
-                if start_date
-                else None
-            ),
-
+            "fecha": start_date.strftime("%Y-%m-%d") if start_date else None,
+            "hora": start_date.strftime("%H:%M") if start_date else None,
             "edad": self._optional_age(),
-
             "genero": self._optional_gender(),
-
             "difficulty": self._optional_difficulty(),
-
-            "duracion": self._optional_duration(
-                end_date
-            ),
+            "duracion": self._optional_duration(end_date),
             "duracion_estimada": self.has_estimated_end_date(),
         }
 
@@ -609,55 +527,40 @@ class SessionParser:
     # MÉTODOS AUXILIARES
     # =========================================================
 
-    def get_answers(self):
-        return deepcopy(
-            self.answers
-        )
+    def get_answers(self) -> list:
+        return list(self.answers)
 
-    def get_events(self):
-        return deepcopy(
-            self.events
-        )
+    def get_events(self) -> list:
+        return list(self.events)
 
-    def get_questionnaire(self):
-        return {
-            "respuestas": self.get_answers()
-        }
+    def get_questionnaire(self) -> dict:
+        return {"respuestas": self.get_answers()}
 
-    def get_features(self):
+    def get_features(self) -> dict:
         return self.get_prediction_features()
 
     def _optional_age(self):
-
         try:
             return self.get_age()
-
         except (TypeError, ValueError):
             return None
 
     def _optional_gender(self):
-
         try:
             return self.get_gender()
-
         except (TypeError, ValueError):
             return None
 
     def _optional_difficulty(self):
-
         try:
             return self.get_difficulty()
-
         except (TypeError, ValueError):
             return None
 
     def _optional_duration(self, end_date):
-
         if end_date is None:
             return None
-
         try:
             return self.get_duration()
-
         except (TypeError, ValueError):
             return None

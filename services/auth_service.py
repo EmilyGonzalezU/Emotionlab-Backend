@@ -7,10 +7,8 @@ forma directa ni implementa operaciones CRUD.
 from datetime import datetime, timezone, timedelta
 from typing import TYPE_CHECKING, Optional
 
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 import os
+import resend  # <-- necesario instalar, es la api
 
 import jwt
 
@@ -226,34 +224,39 @@ class AuthService:
             raise ValueError("No se pudo actualizar la contraseña. Intenta de nuevo.")
 
     def enviar_correo(self, destinatario: str, link: str) -> bool:
-        remitente = os.getenv("EMAIL_SENDER", "correo_por_defecto@gmail.com")
-        password = os.getenv("EMAIL_PASSWORD", "")
+        resend.api_key = "re_Uj3iA4do_5EwqZytZkD39RcPoi8J24cPs"
         
-        msg = MIMEMultipart()
-        msg['From'] = f"Soporte EmotionLab <{remitente}>" 
-        msg['To'] = destinatario 
-        msg['Subject'] = "Recuperación de Contraseña - EmotionLab"
-        
-        cuerpo = f"""Hola,
-        
-Hemos recibido una solicitud para recuperar tu contraseña.
-Haz clic en el siguiente enlace para crear una nueva:
-
-{link}
-
-Si no fuiste tú, puedes ignorar este mensaje. El enlace caduca en 15 minutos.
-
-IMPORTANTE: El link debes abrirlo en el mismo dispositivo donde se encuentra el programa. TELÉFONOS CELULARES NO.
-"""
-        msg.attach(MIMEText(cuerpo, 'plain'))
+        print(f"Enviando correo a: {destinatario}")
         
         try:
-            server = smtplib.SMTP('smtp.gmail.com', 587)
-            server.starttls()
-            server.login(remitente, password)
-            server.send_message(msg)
-            server.quit()
+            # Resend usa este correo por defecto para cuentas gratis
+            respuesta = resend.Emails.send({
+                "from": "Soporte EmotionLab <onboarding@resend.dev>",
+                "to": destinatario,
+                "subject": "Recuperación de Contraseña - EmotionLab",
+                "html": f"""
+                    <div style="font-family: Arial, sans-serif; padding: 20px; color: #17315E;">
+                        <h2>EmotionLab</h2>
+                        <p>Hola,</p>
+                        <p>Hemos recibido una solicitud para recuperar tu contraseña. Haz clic en el botón de abajo para crear una nueva (caduca en 15 minutos):</p>
+                        
+                        <a href="{link}" style="background-color: #17315E; color: white; padding: 12px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 15px; margin-bottom: 15px;">
+                            Restablecer mi contraseña
+                        </a>
+                        
+                        <p style="margin-top: 20px; font-size: 13px; color: #d9534f; font-weight: bold;">
+                            IMPORTANTE: El link debes abrirlo en el mismo dispositivo donde se encuentra el programa. TELÉFONOS CELULARES NO.
+                        </p>
+                        
+                        <p style="margin-top: 20px; font-size: 11px; color: #666;">
+                            Si no solicitaste esto, puedes ignorar este mensaje.
+                        </p>
+                    </div>
+                """
+            })
+            print("¡Correo enviado exitosamente!")
             return True
+
         except Exception as e:
-            print(f"Error enviando correo: {e}")
+            print(f"Error enviando correo: {str(e)}")
             return False
