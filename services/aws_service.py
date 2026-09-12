@@ -6,14 +6,13 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
-
 DEFAULT_UNITY_DATA_URL = "https://c2a1zfsvcj.execute-api.us-east-1.amazonaws.com/prod/data"
 
 
 class AWSService:
     """Obtiene el lote JSON de Unity sin conocer la logica de importacion."""
 
-    def __init__(self, data_url: str | None = None, timeout: int = 30):
+    def __init__(self, data_url: str | None = None, timeout: int = 120):
         self.data_url = data_url or os.getenv("AWS_UNITY_DATA_URL", DEFAULT_UNITY_DATA_URL)
         self.timeout = timeout
 

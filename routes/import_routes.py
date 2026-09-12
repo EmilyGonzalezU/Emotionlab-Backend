@@ -5,7 +5,7 @@ from middleware.jwt_required import jwt_required
 from middleware.roles_required import roles_required
 
 
-imports_bp = Blueprint("imports", __name__, url_prefix="/import")
+imports_bp = Blueprint("imports", __name__)
 
 
 @imports_bp.post("/sessions")

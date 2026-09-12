@@ -1,4 +1,10 @@
-from uuid import uuid4
+"""Rutas de usuarios — EmotionLab (ETAPA 2 AWS).
+
+Cambios clave respecto a legacy:
+    - POST /users NO RECIBE password en el body.
+        Cognito genera la contraseña temporal y envía la invitación.
+  - /users/me/password -> delega a Cognito ChangePassword (no hay password_hash local).
+"""
 
 from flask import (
     Blueprint,
@@ -21,15 +27,8 @@ users_bp = Blueprint(
 )
 
 
-# ============================================================
-# USUARIO AUTENTICADO (ya cargado en g.current_user por jwt_required)
-# ============================================================
-
 def _current_actor() -> tuple[str, dict]:
-    """
-    Retorna (actor_uid, actor_info) a partir del usuario ya cargado
-    por ``jwt_required`` en ``g.current_user``. Sin lecturas extra.
-    """
+    """Retorna (actor_uid, actor_info) desde g.current_user inyectado por jwt_required."""
     current_user = getattr(g, "current_user", {}) or {}
     actor_uid = current_user.get("uid") or current_user.get("id")
     if not actor_uid:
@@ -57,40 +56,49 @@ def list_users():
 
 
 # ============================================================
-# CREAR USUARIO
+# CREAR USUARIO — ETAPA 2 (SIN password en body)
 # ============================================================
 
 @users_bp.post("")
 @jwt_required
 @roles_required(ROLE_ADMIN)
 def create_user():
+    """Crea un especialista/administrador.
+
+    Body:
+        nombre (str): Nombre completo.
+        email (str):  Correo único.
+        rol (str):    ROLE_ADMIN o ROLE_TEACHER.
+
+    NO SE ESPERA password: Cognito genera una temporal y envía la invitación.
+    """
     body = request.get_json(silent=True) or {}
 
-    required = ("nombre", "email", "rol", "password")
+    required = ("nombre", "email", "rol")
     if any(not body.get(field) for field in required):
         return jsonify({
-            "error": "nombre, email, rol y password son obligatorios"
+            "error": "nombre, email y rol son obligatorios (password NO se recibe aquí; se genera temporal en Cognito)"
         }), 400
 
-    uid = str(uuid4())
     services = _services()
-    crypto = services["crypto_service"]
     user_service = services["user_service"]
     actor_uid, actor_info = _current_actor()
 
+    # Cognito genera la contraseña temporal y envía la invitación por email.
     user = user_service.create_user(
-        uid,
+        "",
         body["nombre"],
         body["email"],
         body["rol"],
-        crypto.hash_password(body["password"]),
     )
+    target_uid = user.get("uid")
 
     user_service.log_activity(
         actor_uid,
-        "Creación de usuario",
-        target_uid=uid,
+        "Creación de usuario (Cognito + DynamoDB)",
+        target_uid=target_uid,
         actor_info=actor_info,
+        extra={"creado_en_cognito": True, "invitacion_enviada_por_cognito": True},
     )
 
     return jsonify(user_service.public_user(user)), 201
@@ -140,7 +148,7 @@ def update_user(uid):
 
 
 # ============================================================
-# DESHABILITAR USUARIO
+# DESHABILITAR / HABILITAR USUARIO
 # ============================================================
 
 @users_bp.patch("/<uid>/disable")
@@ -154,10 +162,6 @@ def disable_user(uid):
     user_service.disable_user(uid)
     return jsonify({"message": "Usuario deshabilitado correctamente"}), 200
 
-
-# ============================================================
-# HABILITAR USUARIO
-# ============================================================
 
 @users_bp.patch("/<uid>/enable")
 @jwt_required
@@ -200,12 +204,17 @@ def delete_user(uid):
 
 
 # ============================================================
-# CAMBIAR CONTRASEÑA
+# CAMBIAR MI CONTRASEÑA — ETAPA 2 (Cognito)
 # ============================================================
 
 @users_bp.patch("/me/password")
 @jwt_required
 def change_password():
+    """Cambio de contraseña estando autenticado.
+
+    Delegado 100% a Cognito (no existe password_hash en DynamoDB).
+    Body: { current_password, new_password }
+    """
     body = request.get_json(silent=True) or {}
 
     if not body.get("current_password") or not body.get("new_password"):
@@ -213,40 +222,31 @@ def change_password():
             "error": "current_password y new_password son obligatorios"
         }), 400
 
-    # ✅ VALIDACIÓN DE LONGITUD MÍNIMA
     if len(body["new_password"]) < 8:
         return jsonify({
             "error": "La nueva contraseña debe tener al menos 8 caracteres"
         }), 400
 
-    services = _services()
-    crypto_service = services["crypto_service"]
-    user_service = services["user_service"]
+    auth_service = _services()["auth_service"]
+    authorization = request.headers.get("Authorization", "")
+    _, _, access_token = authorization.partition(" ")
 
-    actor_uid, _ = _current_actor()
-
-    db_user = user_service.get_user(actor_uid)
-    if db_user is None:
-        return jsonify({"error": "Usuario no encontrado"}), 404
-
-    if not crypto_service.verify_password(
-        body["current_password"],
-        db_user["password_hash"],
-    ):
-        return jsonify({"error": "La contraseña actual es incorrecta"}), 400
-
-    user_service.update_password(
-        actor_uid,
-        crypto_service.hash_password(body["new_password"]),
-    )
+    try:
+        auth_service.change_password(
+            access_token=access_token,
+            old_password=body["current_password"],
+            new_password=body["new_password"],
+        )
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
+    except Exception as exc:
+        return jsonify({"error": f"Error al cambiar la contraseña: {exc}"}), 500
 
     return jsonify({"message": "Contraseña actualizada correctamente"}), 200
 
+
 # ============================================================
-# USUARIO ACTUAL
-#
-# jwt_required ya cargó el usuario desde Firebase y lo dejó en
-# g.current_user (lectura hecha). No volvemos a consultar.
+# USUARIO ACTUAL (lectura ya hecha por jwt_required en g.current_user)
 # ============================================================
 
 @users_bp.get("/me")

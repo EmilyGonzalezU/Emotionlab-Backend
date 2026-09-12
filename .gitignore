@@ -1,11 +1,110 @@
+# ============================================================
+# Build / Python
+# ============================================================
 dist/
 build/
+docs/
+node_modules/
 *.exe
 __pycache__/
-.env
-firebase_key.json
+*.py[cod]
+*$py.class
+.pytest_cache/
+.tox/
+.coverage
+htmlcov/
 
-# Agregado por seguridad
-venv/
+# ============================================================
+# Entornos virtuales y paquetes locales
+# ============================================================
+.venv/
 env/
+venv/
+ENV/
+site-packages/
+lib64/
+*.egg-info/
+.eggs/
+lambda-model-test/
+lambda-model-test.zip
+lambda-sync.zip
+
+# ============================================================
+# Credenciales — NUNCA INCLUIR EN GIT
+# ============================================================
+.env
+.env.*
+.env.local
+.env.*.local
+!.env.example
+firebase_key.json
+config/firebase_key.json
+key.json
+email-values.json
+values.json
+*-credentials.json
+*service-account*.json
+*.p12
+*.key
+*.pem
+*.crt
+*.cer
+.aws/
 credentials/
+secrets/
+*.credential.json
+
+# ============================================================
+# Terraform — NO subir state ni providers binarios
+# ============================================================
+# Carpeta local de Terraform con providers descargados
+infrastructure/terraform/**/.terraform/
+infrastructure/terraform/**/.terraform.lock.hcl
+# State files (NUNCA subir el tfstate)
+infrastructure/terraform/**/*.tfstate
+infrastructure/terraform/**/*.tfstate.*
+*.tfstate
+*.tfstate.*
+# Backups de state
+infrastructure/terraform/**/*.backup
+# Crash logs
+crash.log
+*.tfstate.backup
+
+# ============================================================
+# Outputs migracion datos (contienen datos reales de usuarios/participantes)
+# ============================================================
+scripts/migration/data_export/
+scripts/migration/data_transformed/
+scripts/migration/import_summary.json
+scripts/migration/validation_report.json
+scripts/migration/id_mappings.json
+
+# ============================================================
+# IDE / OS
+# ============================================================
+.vscode/
+.idea/
+logs/
+*.log
+**/__pycache__/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+*.bak
+lambda-model-test.zip
+lambda-sync.zip 
+tests/
+aws_test/
+EmotionLabBackend.spec
+lambda-sync/
+lambda-model-test/
+# Python caches
+__pycache__/
+*.pyc
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan

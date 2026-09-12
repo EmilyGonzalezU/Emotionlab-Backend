@@ -1,193 +1,92 @@
-# EmotionLab Backend
+# EmotionLab Backend AWS
 
-Backend de EmotionLab construido con Flask para autenticación, administración de usuarios, importación de sesiones, predicción con Machine Learning y entrega de reportes.
-
-![Flask](https://img.shields.io/badge/Flask-2.3+-000000?style=for-the-badge&logo=flask)
-![Python](https://img.shields.io/badge/Python-3.12+-3776AB?style=for-the-badge&logo=python&logoColor=white)
-![Firebase](https://img.shields.io/badge/Firebase-Firestore%20%2B%20Storage-FFCA28?style=for-the-badge&logo=firebase&logoColor=black)
-![Tests](https://img.shields.io/badge/pytest-suite-blue?style=for-the-badge)
-
-## Resumen
-
-- Autenticación JWT con control de acceso por roles.
-- Administración de visualizadores desde endpoints dedicados.
-- Dashboard, sesiones, reportes e importación para el rol visualizador.
-- Integración con Firebase, AWS S3 y un modelo de predicción en Scikit-Learn.
+API REST de EmotionLab construida con Flask. La plataforma usa servicios AWS como fuente oficial de autenticación, persistencia, almacenamiento, correo y observabilidad.
 
 ## Arquitectura
 
-```mermaid
-flowchart LR
-	Frontend[Frontend React + Electron] --> API[EmotionLab Backend]
-	API --> Auth[AuthService]
-	API --> Users[UserService]
-	API --> Sessions[SessionService]
-	API --> Reports[ReportService]
-	API --> Import[ImportService]
-	API --> DB[(Firebase Firestore)]
-	API --> Storage[(Firebase Storage / AWS S3)]
-	API --> ML[Modelo IA]
-```
+- **Flask**: API HTTP y registro de rutas.
+- **Amazon Cognito**: autenticación y gestión de usuarios.
+- **DynamoDB**: usuarios, participantes, sesiones, auditoría y solicitudes de reporte.
+- **S3**: datos brutos de sesiones y reportes generados.
+- **Lambda**: adaptador HTTP y tareas de sincronización/procesamiento.
+- **SES**: notificaciones por correo.
+- **CloudWatch**: registros y métricas operacionales.
 
-## Estructura
-
-```text
-Emotionlab-Backend/
-├── app.py
-├── config/
-├── core/
-├── ia/
-├── middleware/
-├── routes/
-├── services/
-├── tests/
-└── utils/
-```
-
-## Requisitos
-
-| Recurso | Versión / uso |
-| --- | --- |
-| Python | 3.12 o superior |
-| Firebase | Firestore y Storage |
-| AWS | S3 para archivos |
-| Modelo IA | `ia/modelo_pipeline.pkl` |
+La aplicación no usa Firebase ni Google Cloud.
 
 ## Instalación
 
+Requiere Python 3.11 o superior.
+
 ```bash
-git clone https://github.com/EmilyGonzalezU/Emotionlab-Backend.git
-cd Emotionlab-Backend
 python -m venv .venv
-.venv\Scripts\activate
+.venv\\Scripts\\activate
 pip install -r requirements.txt
+copy .env.example .env
 ```
 
-En Linux o macOS:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
+Completa `.env` con los nombres de recursos AWS de tu entorno. No subas ese archivo ni credenciales al repositorio.
 
 ## Variables de entorno
 
-Crea un archivo `.env` a partir de la plantilla correspondiente y define al menos:
+| Grupo | Variables |
+| --- | --- |
+| AWS | `AWS_REGION`, `STORAGE_BACKEND` |
+| Cognito | `COGNITO_USER_POOL_ID`, `COGNITO_APP_CLIENT_ID` |
+| DynamoDB | `DYNAMODB_USERS_TABLE`, `DYNAMODB_PARTICIPANTS_TABLE`, `DYNAMODB_SESSIONS_TABLE`, `DYNAMODB_REPORT_REQUESTS_TABLE`, `DYNAMODB_AUDIT_LOGS_TABLE` |
+| S3 | `S3_DATA_BUCKET`, `S3_SESSIONS_RAW_BUCKET`, `S3_REPORT_PDFS_BUCKET` |
+| SES | `SES_SENDER_ADDRESS` |
+| CloudWatch | `CLOUDWATCH_LOG_GROUP`, `CLOUDWATCH_ENABLED` |
+| Lambda | `LAMBDA_SYNC_FUNCTION_NAME`, `LAMBDA_MODEL_FUNCTION_NAME` |
 
-```env
-JWT_SECRET=UnaClaveSuperSecretaDeMasDe32Caracteres
-GOOGLE_APPLICATION_CREDENTIALS=credentials/firebase.json
-```
+Consulta `.env.example` para valores de desarrollo no secretos.
 
-## Ejecución
+## Ejecución local
 
 ```bash
 python app.py
 ```
 
-Servidor local:
-
-```text
-http://localhost:5000
-```
-
-## Pruebas
+Verifica el servicio con:
 
 ```bash
-pytest
+curl http://127.0.0.1:5000/health
 ```
 
-Cobertura actual del proyecto:
+## Endpoints principales
 
-- API
-- Autenticación
-- Dashboard
-- Importación
-- Participantes
-- Predicción
-- Reportes
-- Parser de sesiones
-- Servicio de sesiones
+- `/health`: estado de la API y servicios inicializados.
+- `/auth/*`: autenticación con Cognito y recuperación de contraseña.
+- `/users`, `/participants`, `/sessions`: recursos de la plataforma.
+- `/dashboard/*`: indicadores operacionales.
+- `/reports/*` y `/report-requests/*`: generación, aprobación y descarga de reportes.
+- `/import` y `/imports`: importación y procesamiento de sesiones.
 
-## Roles
+Las rutas protegidas requieren un token válido de Cognito y aplican autorización por roles.
 
-### Administrador
+## Pruebas y validación
 
-Puede iniciar sesión, ver su perfil, cambiar su contraseña y administrar visualizadores.
+```bash
+python -m compileall .
+python -m pip check
+python -m pytest -q
+```
 
-No puede acceder a sesiones, participantes, dashboard clínico ni predicciones.
+## Flujo de producción
 
-### Visualizador
+Las rutas protegidas validan JWT de Cognito y aplican los roles `admin` y
+`teacher`. Los servicios de dominio persisten metadatos en DynamoDB; sesiones
+grandes y PDF se almacenan en S3 privado. Las solicitudes de informe siguen
+`PENDING -> APPROVED -> COMPLETED` (o `REJECTED`/`ERROR`) y solo `COMPLETED`
+emite una URL presigned temporal.
 
-Puede iniciar sesión, ver su perfil, cambiar su contraseña y trabajar con dashboard, sesiones y reportes.
+Los servicios principales son `CognitoService`, `DynamoDBService`,
+`S3Service`, `SESService`, `CloudWatchService`, `AuditService`,
+`SessionService` y `ReportRequestService`. La auditoría no debe recibir
+contraseñas, tokens ni credenciales en sus metadatos.
 
-No puede crear, editar ni eliminar usuarios.
+Consulta `docs/backend-audit-final.md` y `docs/cleanup-report.md` para la
+auditoría de calidad y los artefactos que requieren una decisión antes de
+eliminarse.
 
-## Endpoints
-
-### Autenticación
-
-| Método | Endpoint |
-| --- | --- |
-| POST | `/auth/login` |
-
-### Usuarios
-
-| Método | Endpoint | Acceso |
-| --- | --- | --- |
-| GET | `/users` | Admin |
-| POST | `/users` | Admin |
-| PUT | `/users/<uid>` | Admin |
-| PATCH | `/users/<uid>/enable` | Admin |
-| PATCH | `/users/<uid>/disable` | Admin |
-| DELETE | `/users/<uid>` | Admin |
-| GET | `/users/me` | Admin / Visualizador |
-| PATCH | `/users/me/password` | Admin / Visualizador |
-| GET | `/users/activity` | Admin |
-| GET | `/users/<uid>/activity` | Admin |
-
-### Dashboard
-
-| Método | Endpoint | Acceso |
-| --- | --- | --- |
-| GET | `/dashboard` | Visualizador |
-
-### Sesiones
-
-| Método | Endpoint | Acceso |
-| --- | --- | --- |
-| GET | `/sessions` | Visualizador |
-| GET | `/sessions/<id>` | Visualizador |
-
-### Importación
-
-| Método | Endpoint | Acceso |
-| --- | --- | --- |
-| POST | `/import/sync` | Visualizador |
-
-### Reportes
-
-| Método | Endpoint | Acceso |
-| --- | --- | --- |
-| GET | `/reports` | Visualizador |
-| GET | `/reports/export` | Visualizador |
-
-## Seguridad
-
-- JWT para autenticación.
-- Hash de contraseñas con Passlib + bcrypt.
-- Control de acceso por roles.
-- Variables de entorno para secretos.
-- CORS para el frontend.
-
-## Integraciones
-
-- Firebase Firestore
-- Firebase Storage
-- AWS S3
-- Frontend React + Electron
-
-## Estado
-
-Backend funcional con autenticación, administración de usuarios, importación de sesiones, predicción, reportes y dashboard.
+La función Lambda HTTP se expone desde `lambda_handler.py`; la lógica de negocio permanece en los módulos Flask para compartir validaciones y servicios.

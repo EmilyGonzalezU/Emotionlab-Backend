@@ -80,25 +80,54 @@ class SessionParser:
 
     def __init__(self, record: Mapping[str, Any]):
         if not isinstance(record, Mapping):
-            raise SessionParseError("El registro debe ser un objeto JSON")
+            raise SessionParseError(
+                "El registro debe ser un objeto JSON"
+            )
 
         self.record = dict(record)
-        session_data = self.record.get("session_data", {})
+
+        session_data = self.record.get(
+            "session_data",
+            {},
+        )
 
         if not isinstance(session_data, Mapping):
-            raise SessionParseError("session_data debe ser un objeto JSON")
+            raise SessionParseError(
+                "session_data debe ser un objeto JSON"
+            )
 
         self.session = dict(session_data)
-        self.answers = self.session.get("respuestas", [])
-        self.events = self.session.get("eventos", [])
+
+        self.answers = self.session.get(
+            "respuestas",
+            [],
+        )
+
+        self.events = self.session.get(
+            "eventos",
+            [],
+        )
+
+        self.activities = self.session.get(
+            "actividades",
+            [],
+        )
 
         if not isinstance(self.answers, list):
-            raise SessionParseError("respuestas debe ser una lista")
+            raise SessionParseError(
+                "respuestas debe ser una lista"
+            )
 
         if not isinstance(self.events, list):
-            raise SessionParseError("eventos debe ser una lista")
+            raise SessionParseError(
+                "eventos debe ser una lista"
+            )
 
-        # Cachés en memoria por instancia
+        if not isinstance(self.activities, list):
+            raise SessionParseError(
+                "actividades debe ser una lista"
+            )
+
         self._cached_start_date: Optional[datetime] = None
         self._start_date_computed = False
 
@@ -114,43 +143,56 @@ class SessionParser:
     # FECHAS
     # =========================================================
 
-    def _parse_date(self, value) -> Optional[datetime]:
+    def _parse_date(
+        self,
+        value,
+    ) -> Optional[datetime]:
+
         if value is None:
             return None
 
-        # Soporte para epoch timestamps (segundos o milisegundos)
         if isinstance(value, (int, float)):
             try:
-                if value > 1e11:  # Milisegundos
+                if value > 1e11:
                     value = value / 1000.0
+
                 return datetime.fromtimestamp(value)
+
             except (ValueError, OSError):
                 return None
 
         value_str = str(value).strip()
+
         if not value_str:
             return None
 
-        # Intento rápido con fromisoformat (estándar ISO moderno)
         clean_iso = value_str.rstrip("Z")
+
         if "+" in clean_iso:
             clean_iso = clean_iso.split("+")[0]
 
         try:
-            return datetime.fromisoformat(clean_iso)
+            return datetime.fromisoformat(
+                clean_iso
+            )
+
         except ValueError:
             pass
 
         for fmt in self.DATE_FORMATS:
             try:
-                return datetime.strptime(clean_iso, fmt)
+                return datetime.strptime(
+                    clean_iso,
+                    fmt,
+                )
+
             except ValueError:
                 continue
 
         return None
 
     def get_start_date(self) -> Optional[datetime]:
-        """Obtiene la fecha de inicio de la sesión con caché en memoria."""
+
         if self._start_date_computed:
             return self._cached_start_date
 
@@ -166,39 +208,61 @@ class SessionParser:
             "created_at",
         )
 
-        # 1. Buscar en session_data
+        # session_data
         for key in keys_to_check:
-            parsed = self._parse_date(self.session.get(key))
+
+            parsed = self._parse_date(
+                self.session.get(key)
+            )
+
             if parsed is not None:
+
                 self._cached_start_date = parsed
                 self._start_date_computed = True
+
                 return parsed
 
-        # 2. Buscar en la raíz del record
+        # raíz
         for key in keys_to_check:
-            parsed = self._parse_date(self.record.get(key))
+
+            parsed = self._parse_date(
+                self.record.get(key)
+            )
+
             if parsed is not None:
+
                 self._cached_start_date = parsed
                 self._start_date_computed = True
+
                 return parsed
 
-        # 3. Fallback al timestamp del primer evento o respuesta
-        for item in (*self.events, *self.answers):
-            if isinstance(item, Mapping):
-                timestamp = item.get("timestamp") or item.get("fecha") or item.get("date")
-                parsed = self._parse_date(timestamp)
-                if parsed is not None:
-                    self._cached_start_date = parsed
-                    self._start_date_computed = True
-                    return parsed
+        # eventos/respuestas
+        for item in self._timestamp_items():
+
+            parsed = self._parse_date(
+                self._timestamp_value(item)
+            )
+
+            if parsed is not None:
+
+                self._cached_start_date = parsed
+                self._start_date_computed = True
+
+                return parsed
 
         self._cached_start_date = None
         self._start_date_computed = True
+
         return None
 
-    def _get_completed_event_timestamp(self) -> Optional[datetime]:
-        """Busca un evento que indique que la sesión terminó."""
-        for event in reversed(self.events):
+    def _get_completed_event_timestamp(
+        self,
+    ) -> Optional[datetime]:
+
+        for event in reversed(
+            list(self._timestamp_items())
+        ):
+
             if not isinstance(event, Mapping):
                 continue
 
@@ -218,86 +282,220 @@ class SessionParser:
                 or event.get("date")
             )
 
-            parsed_timestamp = self._parse_date(timestamp)
+            parsed_timestamp = self._parse_date(
+                timestamp
+            )
+
             if parsed_timestamp is not None:
                 return parsed_timestamp
 
         return None
 
     def get_end_date(self) -> Optional[datetime]:
-        """Obtiene la fecha de término con caché."""
+
         if self._end_date_computed:
             return self._cached_end_date
 
-        keys_fin = ("fechaFin", "fecha_fin", "end_time", "endTime")
+        keys_fin = (
+            "fechaFin",
+            "fecha_fin",
+            "end_time",
+            "endTime",
+        )
+
         for key in keys_fin:
-            fecha_fin = self._parse_date(self.session.get(key))
+
+            fecha_fin = self._parse_date(
+                self.session.get(key)
+            )
+
             if fecha_fin is not None:
+
                 self._cached_end_date = fecha_fin
                 self._end_date_computed = True
+
                 return fecha_fin
 
-        completed = self._get_completed_event_timestamp()
+        completed = (
+            self._get_completed_event_timestamp()
+        )
+
         if completed is not None:
+
             self._cached_end_date = completed
             self._end_date_computed = True
+
             return completed
 
-        last_act = self._get_last_activity_timestamp()
+        last_act = (
+            self._get_last_activity_timestamp()
+        )
+
         self._cached_end_date = last_act
         self._end_date_computed = True
+
         return last_act
 
-    def _get_last_activity_timestamp(self) -> Optional[datetime]:
-        """Obtiene la última actividad válida para estimar el fin."""
+    def _get_last_activity_timestamp(
+        self,
+    ) -> Optional[datetime]:
+
         if self._last_activity_computed:
             return self._cached_last_activity
 
         timestamps = []
+
         start = self.get_start_date()
-        for item in (*self.events, *self.answers):
-            if not isinstance(item, Mapping):
-                continue
-            timestamp = item.get("timestamp") or item.get("fecha") or item.get("date")
-            parsed = self._parse_date(timestamp)
-            if parsed is not None and (start is None or parsed > start):
+
+        for item in self._timestamp_items():
+
+            parsed = self._parse_date(
+                self._timestamp_value(item)
+            )
+
+            if (
+                parsed is not None
+                and (
+                    start is None
+                    or parsed > start
+                )
+            ):
                 timestamps.append(parsed)
 
-        result = max(timestamps) if timestamps else None
+        result = (
+            max(timestamps)
+            if timestamps
+            else None
+        )
+
         self._cached_last_activity = result
         self._last_activity_computed = True
+
         return result
 
-    def has_real_end_date(self) -> bool:
+    def _timestamp_items(self):
+
+        sources = (
+            self.events,
+            self.activities,
+            self.answers,
+            self.session.get(
+                "activities",
+                [],
+            ),
+            self.session.get(
+                "activity",
+                [],
+            ),
+        )
+
+        for source in sources:
+            yield from self._walk_timestamp_items(
+                source
+            )
+
+    def _walk_timestamp_items(
+        self,
+        value,
+    ):
+
+        if isinstance(value, Mapping):
+
+            if any(
+                key in value
+                for key in (
+                    "timestamp",
+                    "fecha",
+                    "date",
+                    "time",
+                )
+            ):
+                yield value
+
+            for child in value.values():
+
+                if isinstance(
+                    child,
+                    (Mapping, list, tuple),
+                ):
+                    yield from self._walk_timestamp_items(
+                        child
+                    )
+
+        elif isinstance(value, (list, tuple)):
+
+            for child in value:
+                yield from self._walk_timestamp_items(
+                    child
+                )
+
+    @staticmethod
+    def _timestamp_value(
+        item: Mapping[str, Any],
+    ):
+
         return (
-            self._parse_date(self.session.get("fechaFin")) is not None
-            or self._parse_date(self.session.get("fecha_fin")) is not None
-            or self._get_completed_event_timestamp() is not None
+            item.get("timestamp")
+            or item.get("fecha")
+            or item.get("date")
+            or item.get("time")
+        )
+
+    def has_real_end_date(self) -> bool:
+
+        return (
+            self._parse_date(
+                self.session.get("fechaFin")
+            )
+            is not None
+            or self._parse_date(
+                self.session.get("fecha_fin")
+            )
+            is not None
+            or self._get_completed_event_timestamp()
+            is not None
         )
 
     def has_estimated_end_date(self) -> bool:
-        return not self.has_real_end_date() and self._get_last_activity_timestamp() is not None
+
+        return (
+            not self.has_real_end_date()
+            and self._get_last_activity_timestamp()
+            is not None
+        )
 
     # =========================================================
     # DURACIÓN
     # =========================================================
 
     def _calculate_duration(self) -> int:
+
         start = self.get_start_date()
         end = self.get_end_date()
 
         if start is None:
-            raise ValueError("Fecha de inicio inexistente")
+            raise ValueError(
+                "Fecha de inicio inexistente"
+            )
 
         if end is None:
-            raise ValueError("La sesión aún no terminó.")
+            raise ValueError(
+                "La sesión aún no terminó."
+            )
 
-        seconds = int((end - start).total_seconds())
+        elapsed = (
+            end - start
+        ).total_seconds()
 
-        if seconds <= 0:
-            raise ValueError("Duración inválida.")
+        if elapsed <= 0:
+            raise ValueError(
+                "Duración inválida."
+            )
 
-        return seconds
+        return max(
+            1,
+            int(elapsed),
+        )
 
     def get_duration(self) -> int:
         return self._calculate_duration()
@@ -307,30 +505,64 @@ class SessionParser:
     # =========================================================
 
     def _get_answers_map(self) -> dict:
+
         if self._answers_map is None:
+
             mapping = {}
+
             for answer in self.answers:
-                if isinstance(answer, Mapping):
-                    qid = str(answer.get("idPregunta", "")).strip().lower()
-                    if qid:
-                        mapping[qid] = answer.get("respuestaLabel")
+
+                if not isinstance(
+                    answer,
+                    Mapping,
+                ):
+                    continue
+
+                qid = str(
+                    answer.get(
+                        "idPregunta",
+                        "",
+                    )
+                ).strip().lower()
+
+                if qid:
+                    mapping[qid] = (
+                        answer.get(
+                            "respuestaLabel"
+                        )
+                    )
+
             self._answers_map = mapping
+
         return self._answers_map
 
-    def _answer(self, question: str):
-        return self._get_answers_map().get(str(question).strip().lower())
+    def _answer(
+        self,
+        question: str,
+    ):
+
+        return self._get_answers_map().get(
+            str(question)
+            .strip()
+            .lower()
+        )
 
     # =========================================================
     # EDAD
     # =========================================================
 
     def get_age(self) -> int:
+
         age = self._answer("edad")
 
         if age is None:
             return self.DEFAULT_AGE
 
-        age_digits = re.sub(r"\D", "", str(age))
+        age_digits = re.sub(
+            r"\D",
+            "",
+            str(age),
+        )
 
         if not age_digits:
             return self.DEFAULT_AGE
@@ -341,50 +573,104 @@ class SessionParser:
     # GÉNERO
     # =========================================================
 
-    def _normalize_gender(self, value) -> str:
+    def _normalize_gender(
+        self,
+        value,
+    ) -> str:
+
         if value is None:
             return self.DEFAULT_GENDER
 
         normalized = str(value).strip()
-        return self.GENDER_MAPPING.get(normalized, self.DEFAULT_GENDER)
+
+        return self.GENDER_MAPPING.get(
+            normalized,
+            self.DEFAULT_GENDER,
+        )
 
     def get_gender(self) -> str:
+
         gender = self._answer("genero")
 
         if gender is None:
-            gender = self.session.get("genero")
+            gender = self.session.get(
+                "genero"
+            )
 
-        if gender is None or not str(gender).strip():
+        if (
+            gender is None
+            or not str(gender).strip()
+        ):
             return self.DEFAULT_GENDER
 
-        return self._normalize_gender(gender)
+        return self._normalize_gender(
+            gender
+        )
 
     # =========================================================
     # DIFICULTAD
     # =========================================================
 
-    def _normalize_difficulty(self, value) -> str:
+    def _normalize_difficulty(
+        self,
+        value,
+    ) -> str:
+
         if value is None:
-            raise ValueError("Dificultad inexistente")
+            raise ValueError(
+                "Dificultad inexistente"
+            )
 
-        val_cleaned = str(value).strip().lower()
+        val_cleaned = (
+            str(value)
+            .strip()
+            .lower()
+        )
+
         if val_cleaned not in self.DIFFICULTY_MAPPING:
-            raise ValueError(f"Dificultad inválida: {value}")
 
-        return self.DIFFICULTY_MAPPING[val_cleaned]
+            raise ValueError(
+                f"Dificultad inválida: {value}"
+            )
 
-    def get_difficulty(self) -> str:
-        return self._normalize_difficulty(self.session.get("difficulty_level"))
+        return self.DIFFICULTY_MAPPING[
+            val_cleaned
+        ]
+
+    def get_difficulty(
+        self,
+    ) -> Optional[str]:
+
+        value = self.session.get(
+            "difficulty_level"
+        )
+
+        # IMPORTANTE:
+        # vacío o None = dato faltante.
+        # No inventamos una dificultad.
+
+        if (
+            value is None
+            or not str(value).strip()
+        ):
+            return None
+
+        return self._normalize_difficulty(
+            value
+        )
 
     # =========================================================
     # HORA
     # =========================================================
 
     def get_hour(self) -> int:
+
         start_date = self.get_start_date()
 
         if start_date is None:
-            raise ValueError("Fecha de inicio inexistente")
+            raise ValueError(
+                "Fecha de inicio inexistente"
+            )
 
         return start_date.hour
 
@@ -393,10 +679,13 @@ class SessionParser:
     # =========================================================
 
     def get_weekday(self) -> int:
+
         start_date = self.get_start_date()
 
         if start_date is None:
-            raise ValueError("Fecha de inicio inexistente")
+            raise ValueError(
+                "Fecha de inicio inexistente"
+            )
 
         return start_date.weekday()
 
@@ -412,25 +701,48 @@ class SessionParser:
     # =========================================================
 
     def get_scene(self) -> str:
+
         for answer in self.answers:
-            if not isinstance(answer, Mapping):
+
+            if not isinstance(
+                answer,
+                Mapping,
+            ):
                 continue
 
             scene = answer.get("escena")
+
             if not scene:
                 continue
 
-            scene_str = str(scene).strip().lower()
+            scene_str = (
+                str(scene)
+                .strip()
+                .lower()
+            )
+
             if scene_str in self.ESCENAS_EXCLUIDAS:
                 continue
 
             if scene_str in self.ESCENAS_VALIDAS:
                 return scene_str
 
-        session_scene = self.session.get("escena")
+        session_scene = self.session.get(
+            "escena"
+        )
+
         if session_scene:
-            session_scene_str = str(session_scene).strip().lower()
-            if session_scene_str in self.ESCENAS_VALIDAS:
+
+            session_scene_str = (
+                str(session_scene)
+                .strip()
+                .lower()
+            )
+
+            if (
+                session_scene_str
+                in self.ESCENAS_VALIDAS
+            ):
                 return session_scene_str
 
         return "consulta_virtual"
@@ -440,6 +752,7 @@ class SessionParser:
     # =========================================================
 
     def get_prediction_features(self) -> dict:
+
         return {
             "edad": self.get_age(),
             "hora": self.get_hour(),
@@ -455,48 +768,97 @@ class SessionParser:
     # VALIDACIÓN DE PREDICCIÓN
     # =========================================================
 
-    def get_prediction_missing_fields(self) -> list[str]:
+    def get_prediction_missing_fields(
+        self,
+    ) -> list[str]:
+
         missing = []
+
+        # ---------------------------------------------
+        # Fecha de inicio
+        # ---------------------------------------------
 
         if self.get_start_date() is None:
             missing.append("fechaInicio")
 
+        # ---------------------------------------------
+        # Fecha de término / actividad
+        # ---------------------------------------------
+
         if self.get_end_date() is None:
-            missing.append("fechaFin/session_completed/actividad")
+            missing.append(
+                "fechaFin/session_completed/actividad"
+            )
+
+        # ---------------------------------------------
+        # Edad
+        # ---------------------------------------------
 
         try:
             self.get_age()
+
         except ValueError:
             missing.append("edad")
 
+        # ---------------------------------------------
+        # Género
+        # ---------------------------------------------
+
         try:
             self.get_gender()
+
         except ValueError:
             missing.append("genero")
 
-        try:
-            self.get_difficulty()
-        except ValueError:
-            missing.append("difficulty_level")
+        # ---------------------------------------------
+        # DIFICULTAD
+        #
+        # AQUÍ ESTÁ LA CORRECCIÓN PRINCIPAL.
+        # ---------------------------------------------
+
+        difficulty = self.get_difficulty()
+
+        if difficulty is None:
+            missing.append(
+                "difficulty_level"
+            )
+
+        # ---------------------------------------------
+        # Escena
+        # ---------------------------------------------
 
         try:
             self.get_scene()
+
         except ValueError:
             missing.append("escena")
 
         return missing
 
     def can_predict(self) -> bool:
-        return len(self.get_prediction_missing_fields()) == 0
+
+        return (
+            len(
+                self.get_prediction_missing_fields()
+            )
+            == 0
+        )
 
     def get_prediction_status(self) -> dict:
-        missing = self.get_prediction_missing_fields()
+
+        missing = (
+            self.get_prediction_missing_fields()
+        )
 
         if missing:
+
             return {
                 "can_predict": False,
                 "missing_fields": missing,
-                "reason": "Faltan datos requeridos para ejecutar la predicción",
+                "reason": (
+                    "Faltan datos requeridos "
+                    "para ejecutar la predicción"
+                ),
             }
 
         return {
@@ -510,17 +872,34 @@ class SessionParser:
     # =========================================================
 
     def get_dashboard_summary(self) -> dict:
+
         start_date = self.get_start_date()
         end_date = self.get_end_date()
 
         return {
-            "fecha": start_date.strftime("%Y-%m-%d") if start_date else None,
-            "hora": start_date.strftime("%H:%M") if start_date else None,
+            "fecha": (
+                start_date.strftime(
+                    "%Y-%m-%d"
+                )
+                if start_date
+                else None
+            ),
+            "hora": (
+                start_date.strftime(
+                    "%H:%M"
+                )
+                if start_date
+                else None
+            ),
             "edad": self._optional_age(),
             "genero": self._optional_gender(),
             "difficulty": self._optional_difficulty(),
-            "duracion": self._optional_duration(end_date),
-            "duracion_estimada": self.has_estimated_end_date(),
+            "duracion": self._optional_duration(
+                end_date
+            ),
+            "duracion_estimada": (
+                self.has_estimated_end_date()
+            ),
         }
 
     # =========================================================
@@ -534,33 +913,47 @@ class SessionParser:
         return list(self.events)
 
     def get_questionnaire(self) -> dict:
-        return {"respuestas": self.get_answers()}
+        return {
+            "respuestas": self.get_answers()
+        }
 
     def get_features(self) -> dict:
         return self.get_prediction_features()
 
     def _optional_age(self):
+
         try:
             return self.get_age()
+
         except (TypeError, ValueError):
             return None
 
     def _optional_gender(self):
+
         try:
             return self.get_gender()
+
         except (TypeError, ValueError):
             return None
 
     def _optional_difficulty(self):
+
         try:
             return self.get_difficulty()
+
         except (TypeError, ValueError):
             return None
 
-    def _optional_duration(self, end_date):
+    def _optional_duration(
+        self,
+        end_date,
+    ):
+
         if end_date is None:
             return None
+
         try:
             return self.get_duration()
+
         except (TypeError, ValueError):
             return None

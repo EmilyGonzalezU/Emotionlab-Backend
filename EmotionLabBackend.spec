@@ -2,10 +2,6 @@ from PyInstaller.utils.hooks import collect_submodules
 
 hiddenimports = []
 
-# Firebase
-hiddenimports += collect_submodules("firebase_admin")
-hiddenimports += collect_submodules("google.cloud")
-
 # Machine Learning
 hiddenimports += collect_submodules("sklearn")
 hiddenimports += collect_submodules("pandas")

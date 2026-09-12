@@ -1,4 +1,4 @@
-"""Caché TTL en memoria para operaciones frecuentes de Firestore.
+"""Caché TTL en memoria para operaciones frecuentes de persistencia.
 
 Usar con MUY CUIDADO: sólo para datos que toleren eventual consistencia
 durante el TTL. Nunca para información de seguridad (permisos, contraseñas),
