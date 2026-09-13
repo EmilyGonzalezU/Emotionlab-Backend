@@ -260,12 +260,15 @@ class AuditService:
 
     def log_report_approved(
         self, actor_uid: str, actor_email: str, actor_rol: str,
-        report_request_id: str, **extra,
+        report_request_id: str, session_id: Optional[str] = None,
+        participant_id: Optional[str] = None, **extra,
     ):
         return self.log(
             AUDIT_REPORT_APPROVED,
             actor_uid=actor_uid, actor_email=actor_email, actor_rol=actor_rol,
             report_request_id=report_request_id,
+            session_id=session_id,
+            participant_id=participant_id,
             extra=extra,
         )
 
@@ -282,12 +285,15 @@ class AuditService:
 
     def log_report_downloaded(
         self, actor_uid: str, actor_email: str, actor_rol: str,
-        report_request_id: str, **extra,
+        report_request_id: str, session_id: Optional[str] = None,
+        participant_id: Optional[str] = None, **extra,
     ):
         return self.log(
             AUDIT_REPORT_DOWNLOADED,
             actor_uid=actor_uid, actor_email=actor_email, actor_rol=actor_rol,
             report_request_id=report_request_id,
+            session_id=session_id,
+            participant_id=participant_id,
             extra=extra,
         )
 

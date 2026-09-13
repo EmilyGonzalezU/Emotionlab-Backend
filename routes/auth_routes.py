@@ -9,6 +9,7 @@ Migracion ETAPA 2 AWS:
   - GET  /me                    -> usuario actual (compatibilidad con frontends legacy)
 """
 
+
 from flask import Blueprint, current_app, g, jsonify, request
 from middleware.jwt_required import jwt_required
 
