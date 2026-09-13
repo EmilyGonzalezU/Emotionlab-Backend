@@ -25,7 +25,7 @@ from routes.report_routes import reports_bp
 from routes.report_requests import report_requests_bp
 from routes.session_routes import sessions_bp
 from routes.user_routes import users_bp
-
+from routes.audit_routes import audit_bp
 
 def _cors_origen_permitido(origin):
     permitidos = {
@@ -128,6 +128,7 @@ def create_app(services: dict | None = None) -> Flask:
         dashboard_bp,
         reports_bp,
         report_requests_bp,
+        audit_bp,
     ):
         app.register_blueprint(blueprint)
 
