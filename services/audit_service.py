@@ -298,7 +298,7 @@ class AuditService:
         )
 
     # ==========================================================
-    # CONSULTAS PAGINADAS EFICIENTES
+    # CONSULTAS PAGINADAS EFICIENTES (Límites aumentados a 2000)
     # ==========================================================
 
     def list_month(
@@ -306,7 +306,7 @@ class AuditService:
         year: int,
         month: int,
         *,
-        limit: int = 100,
+        limit: int = 2000,
         last_evaluated_key: Optional[Mapping[str, Any]] = None,
     ) -> tuple[list[dict], Optional[dict]]:
         """Eventos de un mes (YYYY-MM), orden cronológico descendente."""
@@ -319,11 +319,21 @@ class AuditService:
             exclusive_start_key=last_evaluated_key,
         )
 
+    def list_recent(
+        self,
+        *,
+        limit: int = 2000,
+    ) -> list[dict]:
+        """Obtiene la actividad más reciente del mes actual para rutas genéricas."""
+        now = datetime.now(timezone.utc)
+        items, _ = self.list_month(now.year, now.month, limit=limit)
+        return items
+
     def list_by_actor(
         self,
         actor_uid: str,
         *,
-        limit: int = 100,
+        limit: int = 2000,
         last_evaluated_key: Optional[Mapping[str, Any]] = None,
     ) -> tuple[list[dict], Optional[dict]]:
         """Eventos por usuario actor, vía gsi-audit-actor."""
@@ -340,7 +350,7 @@ class AuditService:
         self,
         action: str,
         *,
-        limit: int = 100,
+        limit: int = 2000,
         last_evaluated_key: Optional[Mapping[str, Any]] = None,
     ) -> tuple[list[dict], Optional[dict]]:
         """Eventos por acción, vía gsi-audit-action."""
@@ -357,7 +367,7 @@ class AuditService:
         self,
         session_id: str,
         *,
-        limit: int = 100,
+        limit: int = 2000,
         last_evaluated_key: Optional[Mapping[str, Any]] = None,
     ) -> tuple[list[dict], Optional[dict]]:
         """Eventos relacionados con una sesión, vía gsi-audit-session."""
@@ -374,7 +384,7 @@ class AuditService:
         self,
         participant_id: str,
         *,
-        limit: int = 100,
+        limit: int = 2000,
         last_evaluated_key: Optional[Mapping[str, Any]] = None,
     ) -> tuple[list[dict], Optional[dict]]:
         """Eventos de un participante mediante el GSI definido en Terraform."""
@@ -391,7 +401,7 @@ class AuditService:
         self,
         report_request_id: str,
         *,
-        limit: int = 100,
+        limit: int = 2000,
         last_evaluated_key: Optional[Mapping[str, Any]] = None,
     ) -> tuple[list[dict], Optional[dict]]:
         """Eventos relacionados con una solicitud de informe, vía gsi-audit-report."""
@@ -408,7 +418,7 @@ class AuditService:
         self,
         target_uid: str,
         *,
-        limit: int = 100,
+        limit: int = 2000,
         last_evaluated_key: Optional[Mapping[str, Any]] = None,
     ) -> tuple[list[dict], Optional[dict]]:
         """Eventos cuyo usuario afectado es ``target_uid``."""
@@ -421,9 +431,9 @@ class AuditService:
             exclusive_start_key=last_evaluated_key,
         )
 
-    def list_by_actor_or_target(self, uid: str, *, limit: int = 100) -> list[dict]:
+    def list_by_actor_or_target(self, uid: str, *, limit: int = 2000) -> list[dict]:
         """Une actividad propia y actividad administrativa sobre un usuario."""
-        limit = max(1, min(int(limit), 500))
+        limit = max(1, min(int(limit), 2000))
         actor_items, _ = self.list_by_actor(uid, limit=limit)
         target_items, _ = self.list_by_target_user(uid, limit=limit)
         unique = {

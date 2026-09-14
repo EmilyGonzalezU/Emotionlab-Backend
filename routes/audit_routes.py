@@ -12,22 +12,22 @@ audit_bp = Blueprint("audit", __name__, url_prefix="/audit-logs")
 @jwt_required
 @roles_required(ROLE_ADMIN)
 def get_logs():
-    # Jugada maestra: En vez de usar el servicio que hicieron ellos (que está fallando),
-    # usamos la conexión a DynamoDB directa. ¡Sin tocar sus archivos!
+    # Jugada maestra definitiva: Leemos hasta 2000 registros y los invertimos en memoria
+    # sin usar comandos que el DynamoDBService personalizado rechace.
     dynamo = current_app.extensions["services"]["dynamodb_service"]
     
     año_actual = datetime.now().year
     mes_actual = datetime.now().month
     audit_month = f"{año_actual:04d}-{mes_actual:02d}"
     
-    # Hacemos la consulta directa omitiendo la palabra que hacía explotar el backend
+    # Quitamos el ScanIndexForward que hacía explotar el servicio, pero mantenemos el límite gigante
     logs, _ = dynamo.query(
         DYNAMODB_TABLE_AUDIT_LOGS,
         Key("PK").eq(f"AUDIT#{audit_month}"),
-        limit=100
+        limit=2000
     )
     
-    # Invertimos la lista para que los logs más nuevitos salgan arriba en tu tabla
+    # Invertimos la lista a la antigua: los últimos (más nuevos) quedan de primeros
     logs_ordenados = logs[::-1] if logs else []
     
     return jsonify({"items": logs_ordenados}), 200

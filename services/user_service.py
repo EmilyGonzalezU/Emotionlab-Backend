@@ -155,6 +155,15 @@ class UserService:
             raise
 
         invalidate_user_cache(cognito_uid)
+
+        # 🛡️ MARTILLO DE AUDITORÍA: Registrar la creación del usuario
+        self.log_activity(
+            actor_uid="SYSTEM",  # Por defecto el sistema para no romper firmas de la ruta
+            action="Creación de usuario",
+            target_uid=cognito_uid,
+            details={"email": email.lower(), "rol": canonical_role}
+        )
+
         public = self.public_user(dynamo_item)
         public["email"] = email.lower()
         return public
@@ -279,6 +288,14 @@ class UserService:
 
         self.dynamo.update_item(self.table, {"uid": uid}, changes)
         invalidate_user_cache(uid)
+        
+        # 🛡️ MARTILLO DE AUDITORÍA: Registrar la actualización (opcional pero buena práctica)
+        self.log_activity(
+            actor_uid="SYSTEM",
+            action="Actualización de usuario",
+            target_uid=uid,
+            details={"campos": list(changes.keys())}
+        )
 
     def update_password(
         self,
@@ -316,8 +333,17 @@ class UserService:
                 )
             except Exception as err:
                 print(f"[UserService] Error eliminando Cognito user: {err}", flush=True)
+                
         self.dynamo.delete_item(self.table, {"uid": uid})
         invalidate_user_cache(uid)
+
+        # 🛡️ MARTILLO DE AUDITORÍA: Registrar la eliminación
+        self.log_activity(
+            actor_uid="SYSTEM",
+            action="Cuenta eliminada",
+            target_uid=uid,
+            details={"email": user.get("email")}
+        )
 
     def exists(self, uid: str) -> bool:
         return self.get_user(uid) is not None
