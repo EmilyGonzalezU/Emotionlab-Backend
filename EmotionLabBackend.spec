@@ -1,38 +1,31 @@
 from PyInstaller.utils.hooks import collect_submodules
 
+
 hiddenimports = []
 
-# Machine Learning
-hiddenimports += collect_submodules("sklearn")
-hiddenimports += collect_submodules("pandas")
-
-# Passlib / bcrypt
-hiddenimports += collect_submodules("passlib")
-hiddenimports += collect_submodules("bcrypt")
-
-# Flask y extras
+# Flask
 hiddenimports += collect_submodules("flask")
 hiddenimports += collect_submodules("flask_cors")
-hiddenimports += collect_submodules("openpyxl")
-hiddenimports += collect_submodules("reportlab")
+
+# Autenticación / criptografía legacy
+hiddenimports += collect_submodules("passlib")
+hiddenimports += collect_submodules("bcrypt")
 hiddenimports += collect_submodules("jwt")
 hiddenimports += collect_submodules("cryptography")
+
+# Configuración
 hiddenimports += collect_submodules("dotenv")
+
+# Generación de reportes
+hiddenimports += collect_submodules("reportlab")
+hiddenimports += collect_submodules("openpyxl")
 
 
 a = Analysis(
     ["app.py"],
     pathex=["."],
     binaries=[],
-
-    # IMPORTANTE: NUNCA incluir .env ni firebase_key.json dentro del
-    # ejecutable, porque son archivos de configuración con SECRETOS y
-    # deben poder cambiarse sin recompilar. Se copian externamente
-    # en resources/config/ por el instalador de Electron.
-    datas=[
-        ("ia/modelo_pipeline.pkl", "ia"),
-    ],
-
+    datas=[],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
@@ -41,19 +34,22 @@ a = Analysis(
         "tkinter",
         "unittest",
         "pytest",
+        "sklearn",
+        "pandas",
+        "joblib",
+        "firebase_admin",
     ],
     noarchive=False,
 )
 
-
 pyz = PYZ(a.pure)
-
 
 exe = EXE(
     pyz,
     a.scripts,
+    a.binaries,
+    a.datas,
     [],
-    exclude_binaries=True,
     name="EmotionLabBackend",
     debug=False,
     bootloader_ignore_signals=False,
@@ -62,13 +58,11 @@ exe = EXE(
     console=True,
 )
 
-
 coll = COLLECT(
     exe,
     a.binaries,
     a.datas,
     strip=False,
     upx=True,
-    upx_exclude=[],
     name="EmotionLabBackend",
 )

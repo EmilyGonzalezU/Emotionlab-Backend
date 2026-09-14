@@ -1,13 +1,65 @@
 import inspect
 import logging
 import os
+import sys
 import traceback
+from pathlib import Path
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify
 from flask_cors import CORS
 
-load_dotenv()
+
+def _load_environment():
+    """
+    Carga el archivo .env dependiendo de cómo se esté ejecutando EmotionLab.
+
+    Desarrollo:
+        Emotionlab-Backend/.env
+
+    Ejecutable PyInstaller:
+        resources/
+        ├── backend/
+        │   └── EmotionLabBackend.exe
+        └── config/
+            └── .env
+    """
+
+    # Directorio donde está app.py en desarrollo
+    base_dir = Path(__file__).resolve().parent
+    development_env = base_dir / ".env"
+
+    # Cuando estamos ejecutando el EXE generado por PyInstaller
+    if getattr(sys, "frozen", False):
+        executable_dir = Path(sys.executable).resolve().parent
+
+        # EmotionLab/resources/backend/
+        # EmotionLab/resources/config/.env
+        packaged_env = executable_dir.parent / "config" / ".env"
+
+        if packaged_env.exists():
+            load_dotenv(
+                dotenv_path=packaged_env,
+                override=False,
+            )
+            return
+
+    # Ejecución normal desde el proyecto
+    if development_env.exists():
+        load_dotenv(
+            dotenv_path=development_env,
+            override=False,
+        )
+    else:
+        # Fallback
+        load_dotenv(override=False)
+
+
+# IMPORTANTE:
+# Esto debe ejecutarse antes de importar los servicios/rutas
+# que utilizan variables de entorno.
+_load_environment()
+
 
 from core.exceptions import (
     AuthenticationError,
@@ -26,6 +78,7 @@ from routes.report_requests import report_requests_bp
 from routes.session_routes import sessions_bp
 from routes.user_routes import users_bp
 from routes.audit_routes import audit_bp
+
 
 def _cors_origen_permitido(origin):
     permitidos = {
@@ -55,19 +108,24 @@ def create_app(services: dict | None = None) -> Flask:
     app.extensions["services"] = services or _build_services()
 
     # Diagnóstico de arranque para asegurar que la ruta de autenticación usa la
-    # misma implementación de Cognito que fue cargada por este proceso. No
-    # registra sesiones, contraseñas ni tokens.
+    # misma implementación de Cognito que fue cargada por este proceso.
+    # No registra sesiones, contraseñas ni tokens.
     cognito_service = app.extensions["services"].get("cognito_service")
+
     if cognito_service is not None:
         cognito_class = type(cognito_service)
         auth_service = app.extensions["services"].get("auth_service")
+
         app.logger.warning(
             "Cognito auth binding: type=%s module=%s file=%s "
             "respond_to_new_password_challenge=%s same_instance=%s",
             cognito_class.__name__,
             cognito_class.__module__,
             inspect.getfile(cognito_class),
-            hasattr(cognito_service, "respond_to_new_password_challenge"),
+            hasattr(
+                cognito_service,
+                "respond_to_new_password_challenge",
+            ),
             getattr(auth_service, "cognito", None) is cognito_service,
         )
 
@@ -104,16 +162,28 @@ def create_app(services: dict | None = None) -> Flask:
     def health_check():
         svc = app.extensions.get("services") or {}
         extras = {}
-        for k in ("dynamodb_service", "cognito_service", "s3_service", "ses_service",
-                  "ssm_service", "cloudwatch_service", "audit_service",
-                  "report_request_service"):
+
+        for k in (
+            "dynamodb_service",
+            "cognito_service",
+            "s3_service",
+            "ses_service",
+            "ssm_service",
+            "cloudwatch_service",
+            "audit_service",
+            "report_request_service",
+        ):
             extras[f"has_{k}"] = svc.get(k) is not None
+
         return jsonify(
             {
                 "status": "healthy",
                 "service": "EmotionLabBackend",
                 "stage": "ETAPA_2_AWS_MIGRATION",
-                "storage_backend": svc.get("storage_backend", "dynamodb"),
+                "storage_backend": svc.get(
+                    "storage_backend",
+                    "dynamodb",
+                ),
                 "services_loaded": extras,
             }
         )
@@ -133,8 +203,17 @@ def create_app(services: dict | None = None) -> Flask:
         app.register_blueprint(blueprint)
 
     # Mantener la ruta legacy /import y el contrato plural /imports.
-    app.register_blueprint(imports_bp, url_prefix="/import", name="imports_legacy")
-    app.register_blueprint(imports_bp, url_prefix="/imports", name="imports_plural")
+    app.register_blueprint(
+        imports_bp,
+        url_prefix="/import",
+        name="imports_legacy",
+    )
+
+    app.register_blueprint(
+        imports_bp,
+        url_prefix="/imports",
+        name="imports_plural",
+    )
 
     return app
 
@@ -143,23 +222,28 @@ def _build_services() -> dict:
     """Construye y enlaza todos los servicios EmotionLab — ETAPA 2 AWS.
 
     Orden de creación (dependencias):
-        1. Servicios base AWS singleton (DynamoDB, Cognito, S3, SES, SSM, CloudWatch)
-        2. AuditService (usa DynamoDB)
-        3. CryptoService (legacy — bcrypt/Fernet, no usado para auth pero mantenido)
-        4. UserService (usa DynamoDB + Cognito)
-        5. AuthService (usa UserService + Cognito + Audit + SES + Crypto legacy fallback)
-        6. ParticipantService (usa DynamoDB)
-        7. PredictionService (IA frozen — NO MODIFICAR)
-        8. SessionService (usa DynamoDB + S3 + Prediction)
-        9. ReportService (usa SessionService + S3)
-       10. ReportRequestService (usa DynamoDB + Session + Report + S3 + Audit + SES)
-       11. DashboardService (usa SessionService)
-       12. ImportService (usa Session + Prediction)
+        1. Servicios base AWS singleton
+        2. AuditService
+        3. CryptoService
+        4. UserService
+        5. AuthService
+        6. ParticipantService
+        7. PredictionService
+        8. SessionService
+        9. ReportService
+        10. ReportRequestService
+        11. DashboardService
+        12. ImportService
     """
+
     # ==========================================================
-    # 1. SERVICIOS AWS BASE — try/except para tolerar entorno sin AWS
+    # 1. SERVICIOS AWS BASE
     # ==========================================================
-    from services.storage_repository import DynamoDBRepository, S3Repository
+    from services.storage_repository import (
+        DynamoDBRepository,
+        S3Repository,
+    )
+
     from services.cognito_service import CognitoService
     from services.s3_service import S3Service
     from services.ses_service import SESService
@@ -167,52 +251,89 @@ def _build_services() -> dict:
     from services.cloudwatch_service import CloudWatchService
     from services.audit_service import AuditService
 
-    storage_backend = os.getenv("STORAGE_BACKEND", "dynamodb").strip().lower()
+    storage_backend = (
+        os.getenv("STORAGE_BACKEND", "dynamodb")
+        .strip()
+        .lower()
+    )
+
     if storage_backend == "s3":
         storage_repository = S3Repository()
         dynamodb_service = None
+
     elif storage_backend == "dynamodb":
         from services.dynamodb_service import DynamoDBService
+
         dynamodb_service = DynamoDBService()
-        storage_repository = DynamoDBRepository(dynamodb_service)
+        storage_repository = DynamoDBRepository(
+            dynamodb_service
+        )
+
     else:
-        raise RuntimeError("STORAGE_BACKEND debe ser 'dynamodb' o 's3'")
+        raise RuntimeError(
+            "STORAGE_BACKEND debe ser 'dynamodb' o 's3'"
+        )
 
     def _safe_build(factory_cls, name: str):
         try:
             return factory_cls()
+
         except Exception as exc:
-            # En entornos sin AWS configurado (por ejemplo tests sin credenciales reales),
-            # el servicio no estará disponible y fallará solo cuando se intente usar.
             import warnings
+
             warnings.warn(
                 f"[ETAPA2] No se pudo inicializar {name}: {exc}. "
-                f"Operaciones relacionadas con {name} fallarán hasta configurar AWS.",
+                f"Operaciones relacionadas con {name} fallarán "
+                f"hasta configurar AWS.",
                 stacklevel=2,
             )
+
             return None
 
-    ssm_service = _safe_build(SSMService, "SSMService")
-    cognito_service = _safe_build(CognitoService, "CognitoService")
-    s3_service = _safe_build(S3Service, "S3Service")
-    ses_service = _safe_build(SESService, "SESService")
-    cloudwatch_service = _safe_build(CloudWatchService, "CloudWatchService")
+    ssm_service = _safe_build(
+        SSMService,
+        "SSMService",
+    )
+
+    cognito_service = _safe_build(
+        CognitoService,
+        "CognitoService",
+    )
+
+    s3_service = _safe_build(
+        S3Service,
+        "S3Service",
+    )
+
+    ses_service = _safe_build(
+        SESService,
+        "SESService",
+    )
+
+    cloudwatch_service = _safe_build(
+        CloudWatchService,
+        "CloudWatchService",
+    )
 
     # ==========================================================
     # 2. AUDIT
     # ==========================================================
-    audit_service = AuditService(dynamodb_service=storage_repository)
+    audit_service = AuditService(
+        dynamodb_service=storage_repository
+    )
 
     # ==========================================================
-    # 3. CRYPTO LEGACY (bcrypt + Fernet — mantiene compatibilidad)
+    # 3. CRYPTO LEGACY
     # ==========================================================
     from services.crypto_service import CryptoService
+
     crypto_service = CryptoService()
 
     # ==========================================================
     # 4. USER / AUTH
     # ==========================================================
     from services.user_service import UserService
+
     user_service = UserService(
         dynamodb_service=storage_repository,
         cognito_service=cognito_service,
@@ -220,6 +341,7 @@ def _build_services() -> dict:
     )
 
     from services.auth_service import AuthService
+
     auth_service = AuthService(
         user_service=user_service,
         cognito_service=cognito_service,
@@ -232,18 +354,24 @@ def _build_services() -> dict:
     # 6. PARTICIPANT
     # ==========================================================
     from services.participant_service import ParticipantService
-    participant_service = ParticipantService(dynamodb_service=storage_repository)
+
+    participant_service = ParticipantService(
+        dynamodb_service=storage_repository
+    )
 
     # ==========================================================
     # 7-8. PREDICTION + SESSION
     # ==========================================================
     from services.prediction_service import PredictionService
+
     prediction_service = PredictionService()
 
     from services.aws_service import AWSService
+
     aws_service = AWSService()
 
     from services.session_service import SessionService
+
     session_service = SessionService(
         dynamodb_service=storage_repository,
         s3_service=s3_service,
@@ -255,12 +383,16 @@ def _build_services() -> dict:
     # 9-10. REPORT + REPORT REQUESTS
     # ==========================================================
     from services.report_service import ReportService
+
     report_service = ReportService(
         session_service=session_service,
         s3_service=s3_service,
     )
 
-    from services.report_request_service import ReportRequestService
+    from services.report_request_service import (
+        ReportRequestService,
+    )
+
     report_request_service = ReportRequestService(
         dynamodb_service=storage_repository,
         audit_svc=audit_service,
@@ -274,9 +406,13 @@ def _build_services() -> dict:
     # 11-12. DASHBOARD + IMPORT
     # ==========================================================
     from services.dashboard_service import DashboardService
-    dashboard_service = DashboardService(session_service=session_service)
+
+    dashboard_service = DashboardService(
+        session_service=session_service
+    )
 
     from services.import_service import ImportService
+
     import_service = ImportService(
         session_service=session_service,
         prediction_service=prediction_service,
@@ -292,21 +428,26 @@ def _build_services() -> dict:
         "ses_service": ses_service,
         "ssm_service": ssm_service,
         "cloudwatch_service": cloudwatch_service,
-        # DOMINIO — AUDIT
+
+        # AUDIT
         "audit_service": audit_service,
+
         # LEGACY
         "crypto_service": crypto_service,
         "aws_service": aws_service,
-        # DOMINIO — AUTH / USERS
+
+        # AUTH / USERS
         "user_service": user_service,
         "auth_service": auth_service,
-        # DOMINIO — SESIONES / PARTICIPANTES / IA
+
+        # SESIONES / PARTICIPANTES / IA
         "session_service": session_service,
         "participant_service": participant_service,
         "prediction_service": prediction_service,
         "import_service": import_service,
         "dashboard_service": dashboard_service,
-        # DOMINIO — REPORTES
+
+        # REPORTES
         "report_service": report_service,
         "report_request_service": report_request_service,
     }
@@ -317,68 +458,162 @@ def _register_error_handlers(app: Flask) -> None:
     @app.errorhandler(InvalidCredentials)
     @app.errorhandler(AuthenticationError)
     def authentication_error(error):
-        return jsonify({"error": str(error)}), 401
+        return jsonify(
+            {
+                "error": str(error)
+            }
+        ), 401
 
     @app.errorhandler(AuthorizationError)
     def authorization_error(error):
-        return jsonify({"error": str(error)}), 403
+        return jsonify(
+            {
+                "error": str(error)
+            }
+        ), 403
 
     @app.errorhandler(UserNotFound)
     @app.errorhandler(SessionNotFound)
     def not_found(error):
-        return jsonify({"error": str(error)}), 404
+        return jsonify(
+            {
+                "error": str(error)
+            }
+        ), 404
 
     @app.errorhandler(ValueError)
     def invalid_request(error):
-        return jsonify({"error": str(error)}), 400
+        return jsonify(
+            {
+                "error": str(error)
+            }
+        ), 400
 
     @app.errorhandler(404)
     def route_not_found(_error):
-        return jsonify({"error": "Ruta no encontrada"}), 404
+        return jsonify(
+            {
+                "error": "Ruta no encontrada"
+            }
+        ), 404
 
     @app.errorhandler(405)
     def method_not_allowed(_error):
-        return jsonify({"error": "Método HTTP no permitido"}), 405
+        return jsonify(
+            {
+                "error": "Método HTTP no permitido"
+            }
+        ), 405
 
     @app.errorhandler(Exception)
     def unhandled_exception(error):
+
         if os.getenv("EMOTIONLAB_LOCAL_DIAGNOSTICS") == "1":
             from botocore.exceptions import ClientError
 
-            print("===== AUTH LOGIN ERROR =====", flush=True)
-            print(f"Exception type: {type(error).__name__}", flush=True)
-            if isinstance(error, ClientError):
-                aws_error = error.response.get("Error", {})
-                metadata = error.response.get("ResponseMetadata", {})
-                print(f"error_code: {aws_error.get('Code')}", flush=True)
-                print(f"http_status: {metadata.get('HTTPStatusCode')}", flush=True)
-                print(f"operation: {getattr(error, 'operation_name', None)}", flush=True)
-            else:
-                print(f"Exception message: {error}", flush=True)
-                print("Traceback:", flush=True)
-                print("".join(traceback.format_exception(error)), end="", flush=True)
-            print("=============================", flush=True)
+            print(
+                "===== AUTH LOGIN ERROR =====",
+                flush=True,
+            )
 
-        # En marcha blanca nunca exponer detalles internos al cliente.
-        # Se loguea a través del logger por defecto de Flask y (si está
-        # disponible) CloudWatch.
-        app.logger.exception("Error no manejado: %s", error)
+            print(
+                f"Exception type: {type(error).__name__}",
+                flush=True,
+            )
+
+            if isinstance(error, ClientError):
+                aws_error = error.response.get(
+                    "Error",
+                    {}
+                )
+
+                metadata = error.response.get(
+                    "ResponseMetadata",
+                    {}
+                )
+
+                print(
+                    f"error_code: {aws_error.get('Code')}",
+                    flush=True,
+                )
+
+                print(
+                    f"http_status: {metadata.get('HTTPStatusCode')}",
+                    flush=True,
+                )
+
+                print(
+                    f"operation: {getattr(error, 'operation_name', None)}",
+                    flush=True,
+                )
+
+            else:
+                print(
+                    f"Exception message: {error}",
+                    flush=True,
+                )
+
+                print(
+                    "Traceback:",
+                    flush=True,
+                )
+
+                print(
+                    "".join(
+                        traceback.format_exception(error)
+                    ),
+                    end="",
+                    flush=True,
+                )
+
+            print(
+                "=============================",
+                flush=True,
+            )
+
+        app.logger.exception(
+            "Error no manejado: %s",
+            error,
+        )
+
         try:
-            cw = app.extensions["services"].get("cloudwatch_service")
+            cw = app.extensions["services"].get(
+                "cloudwatch_service"
+            )
+
             if cw is not None:
                 cw.put_event(
                     level="ERROR",
-                    message=f"UNHANDLED_EXCEPTION: {type(error).__name__}: {error}",
-                    context={"path": getattr(getattr(error, "__traceback__", None), "tb_frame", None)
-                                            and error.__traceback__.tb_frame.f_code.co_filename},
+                    message=(
+                        f"UNHANDLED_EXCEPTION: "
+                        f"{type(error).__name__}: {error}"
+                    ),
+                    context={
+                        "path": (
+                            getattr(
+                                getattr(
+                                    error,
+                                    "__traceback__",
+                                    None,
+                                ),
+                                "tb_frame",
+                                None,
+                            )
+                            and error.__traceback__.tb_frame.f_code.co_filename
+                        )
+                    },
                 )
+
         except Exception:
             pass
 
         return (
             jsonify(
                 {
-                    "error": "Ocurrió un error interno en el servidor."
+                    "error": (
+                        "Ocurrió un error interno "
+                        "en el servidor."
+                    )
                 }
             ),
             500,

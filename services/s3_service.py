@@ -6,17 +6,15 @@ Gestiona buckets privados para:
 
 Utiliza presigned URLs para descargas autenticadas sin exponer el bucket.
 """
-
 from __future__ import annotations
 
 import os
-from datetime import timedelta
 from io import BytesIO
 from typing import Any, Mapping, Optional, Union
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import ClientError
-
 
 class S3Service:
     """Cliente S3 para buckets privados de EmotionLab."""
@@ -33,16 +31,23 @@ class S3Service:
         if getattr(self, "_initialized", False):
             return
 
-        region = os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", "us-east-1"))
+        region = os.getenv(
+        "AWS_REGION",
+            os.getenv("AWS_DEFAULT_REGION", "us-east-1"),
+        )
+
         endpoint = os.getenv("S3_ENDPOINT_URL")
 
-        config: dict[str, Any] = {"region_name": region}
+        client_config: dict[str, Any] = {
+            "region_name": region,
+            "config": Config(signature_version="s3v4"),
+        }
+
         if endpoint:
-            config["endpoint_url"] = endpoint
+            client_config["endpoint_url"] = endpoint
 
-        self._client = boto3.client("s3", **config)
-        self._resource = boto3.resource("s3", **config)
-
+        self._client = boto3.client("s3", **client_config)
+        self._resource = boto3.resource("s3", **client_config)
         self.report_bucket = os.getenv("S3_REPORT_PDFS_BUCKET", "").strip()
         self.sessions_raw_bucket = os.getenv("S3_SESSIONS_RAW_BUCKET", "").strip()
 
