@@ -228,11 +228,15 @@ class ReportRequestService:
         if not session:
             raise SessionNotFound("La sesion no existe")
 
-        if not session.get("prediction"):
-            raise ValueError(
-                "La sesion no tiene prediccion; "
-                "no se puede solicitar informe"
-            )
+        # ------------------------------------------------------------
+        # AQUÍ ELIMINAMOS EL CANDADO PARA PERMITIR SESIONES INCOMPLETAS
+        # ------------------------------------------------------------
+        # if not session.get("prediction"):
+        #     raise ValueError(
+        #         "La sesion no tiene prediccion; "
+        #         "no se puede solicitar informe"
+        #     )
+        # ------------------------------------------------------------
 
         now = DynamoDBService.now_iso()
         request_id = uuid.uuid4().hex
