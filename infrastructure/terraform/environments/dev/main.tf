@@ -13,11 +13,31 @@ provider "aws" {
   region = var.aws_region
 }
 
+data "aws_caller_identity" "current" {}
+
 locals {
   env         = "dev"
   project     = "emotionlab"
   name_prefix = "${local.project}-${local.env}"
+
+  account_id  = data.aws_caller_identity.current.account_id
+  lambda_role = "arn:aws:iam::${local.account_id}:role/${var.lambda_role_name}"
+
+  backend_lambda_name = "EmotionLabBackendFunction"
+  model_lambda_name   = "EmotionLabModelFunction"
+  sync_lambda_name    = "EmotionLabSyncFunction"
+  test_lambda_name    = "EmotionLabTestFunction"
 }
+module "ecr_model" {
+  source = "../../modules/ecr"
+
+  repository_name = var.model_ecr_repository_name
+  project         = local.project
+  env             = local.env
+}
+# ============================================================
+# COGNITO
+# ============================================================
 
 module "cognito" {
   source = "../../modules/cognito"
@@ -30,13 +50,21 @@ module "cognito" {
   ses_source_arn       = var.ses_source_arn
 }
 
+# ============================================================
+# S3 DATA
+# ============================================================
+
 module "s3_data" {
   source = "../../modules/s3_data_bucket"
 
-  bucket_name = "emotionlab-dev-data"
+  bucket_name = var.data_bucket_name != "" ? var.data_bucket_name : "${local.name_prefix}-data-${local.account_id}"
   project     = local.project
   env         = local.env
 }
+
+# ============================================================
+# DYNAMODB USERS
+# ============================================================
 
 module "dynamodb_users" {
   source = "../../modules/dynamodb_table"
@@ -48,17 +76,19 @@ module "dynamodb_users" {
   sort_key_type      = null
   billing_mode       = "PAY_PER_REQUEST"
 
-  #
-  # Regla: solo atributos usados en KeySchema o como hash/range de GSI.
-  #   uid         -> PK
-  #   email       -> gsi-users-email hash_key
-  #   rol         -> gsi-users-rol hash_key
-  #   created_at  -> gsi-users-rol range_key  (ANTES FALTABA - provoca Invalid GSI range_key attribute missing)
-  #
   attributes = [
-    { name = "email", type = "S" },
-    { name = "rol", type = "S" },
-    { name = "created_at", type = "S" },
+    {
+      name = "email"
+      type = "S"
+    },
+    {
+      name = "rol"
+      type = "S"
+    },
+    {
+      name = "created_at"
+      type = "S"
+    }
   ]
 
   global_secondary_indexes = [
@@ -77,7 +107,7 @@ module "dynamodb_users" {
       non_key_attributes = ["uid", "nombre", "email", "activo"]
       read_capacity      = null
       write_capacity     = null
-    },
+    }
   ]
 
   tags = {
@@ -85,6 +115,10 @@ module "dynamodb_users" {
     Env     = local.env
   }
 }
+
+# ============================================================
+# DYNAMODB PARTICIPANTS
+# ============================================================
 
 module "dynamodb_participants" {
   source = "../../modules/dynamodb_table"
@@ -96,16 +130,27 @@ module "dynamodb_participants" {
   sort_key_type      = null
   billing_mode       = "PAY_PER_REQUEST"
 
-  #
-  # participant_id es PK -> NO se repite en attributes (evitar duplicado).
-  # Solo: np_1..np_4 (hash_keys de los 4 GSIs) y nombre_normalizado (range_key comun).
-  #
   attributes = [
-    { name = "np_1", type = "S" },
-    { name = "np_2", type = "S" },
-    { name = "np_3", type = "S" },
-    { name = "np_4", type = "S" },
-    { name = "nombre_normalizado", type = "S" },
+    {
+      name = "np_1"
+      type = "S"
+    },
+    {
+      name = "np_2"
+      type = "S"
+    },
+    {
+      name = "np_3"
+      type = "S"
+    },
+    {
+      name = "np_4"
+      type = "S"
+    },
+    {
+      name = "nombre_normalizado"
+      type = "S"
+    }
   ]
 
   global_secondary_indexes = [
@@ -144,7 +189,7 @@ module "dynamodb_participants" {
       non_key_attributes = ["participant_id", "nombre"]
       read_capacity      = null
       write_capacity     = null
-    },
+    }
   ]
 
   tags = {
@@ -152,6 +197,10 @@ module "dynamodb_participants" {
     Env     = local.env
   }
 }
+
+# ============================================================
+# DYNAMODB SESSIONS
+# ============================================================
 
 module "dynamodb_sessions" {
   source = "../../modules/dynamodb_table"
@@ -163,33 +212,50 @@ module "dynamodb_sessions" {
   sort_key_type      = "S"
   billing_mode       = "PAY_PER_REQUEST"
 
-  #
-  # participant_id y sk son PK+SK -> NO repetir en attributes.
-  # Solo claves de los GSIs:
-  #   status, created_at  (GSI1 hash+range)
-  #   session_id          (GSI2 hash; GSI4 range)
-  #   source_key          (GSI3 hash)
-  #   fecha               (GSI4 hash)
-  #
   attributes = [
-    { name = "session_id", type = "S" },
-    { name = "status", type = "S" },
-    { name = "fecha", type = "S" },
-    { name = "source_key", type = "S" },
-    { name = "created_at", type = "S" },
-    # GSI aditivo para la búsqueda exacta por nombre ya usada en runtime.
-    { name = "nombre", type = "S" },
+    {
+      name = "session_id"
+      type = "S"
+    },
+    {
+      name = "status"
+      type = "S"
+    },
+    {
+      name = "fecha"
+      type = "S"
+    },
+    {
+      name = "source_key"
+      type = "S"
+    },
+    {
+      name = "created_at"
+      type = "S"
+    }
   ]
 
   global_secondary_indexes = [
     {
-      name               = "gsi-sessions-status-date"
-      hash_key           = "status"
-      range_key          = "created_at"
-      projection_type    = "INCLUDE"
-      non_key_attributes = ["session_id", "participant_id", "nombre", "pred_bienestar", "fecha", "hora", "edad", "genero", "difficulty"]
-      read_capacity      = null
-      write_capacity     = null
+      name            = "gsi-sessions-status-date"
+      hash_key        = "status"
+      range_key       = "created_at"
+      projection_type = "INCLUDE"
+
+      non_key_attributes = [
+        "session_id",
+        "participant_id",
+        "nombre",
+        "pred_bienestar",
+        "fecha",
+        "hora",
+        "edad",
+        "genero",
+        "difficulty"
+      ]
+
+      read_capacity  = null
+      write_capacity = null
     },
     {
       name            = "gsi-sessions-sessionid"
@@ -199,31 +265,35 @@ module "dynamodb_sessions" {
       write_capacity  = null
     },
     {
-      name               = "gsi-sessions-sourcekey"
-      hash_key           = "source_key"
-      projection_type    = "INCLUDE"
-      non_key_attributes = ["participant_id", "sk", "session_id"]
-      read_capacity      = null
-      write_capacity     = null
+      name            = "gsi-sessions-sourcekey"
+      hash_key        = "source_key"
+      projection_type = "INCLUDE"
+
+      non_key_attributes = [
+        "participant_id",
+        "sk",
+        "session_id"
+      ]
+
+      read_capacity  = null
+      write_capacity = null
     },
     {
-      name               = "gsi-sessions-fecha"
-      hash_key           = "fecha"
-      range_key          = "session_id"
-      projection_type    = "INCLUDE"
-      non_key_attributes = ["status", "pred_bienestar", "nombre", "participant_id"]
-      read_capacity      = null
-      write_capacity     = null
-    },
-    # session_id ordena resultados de nombres coincidentes sin cambiar PK/SK.
-    {
-      name            = "gsi-sessions-nombre"
-      hash_key        = "nombre"
+      name            = "gsi-sessions-fecha"
+      hash_key        = "fecha"
       range_key       = "session_id"
-      projection_type = "ALL"
-      read_capacity   = null
-      write_capacity  = null
-    },
+      projection_type = "INCLUDE"
+
+      non_key_attributes = [
+        "status",
+        "pred_bienestar",
+        "nombre",
+        "participant_id"
+      ]
+
+      read_capacity  = null
+      write_capacity = null
+    }
   ]
 
   tags = {
@@ -231,6 +301,10 @@ module "dynamodb_sessions" {
     Env     = local.env
   }
 }
+
+# ============================================================
+# DYNAMODB AUDIT LOGS
+# ============================================================
 
 module "dynamodb_audit_logs" {
   source = "../../modules/dynamodb_table"
@@ -242,21 +316,35 @@ module "dynamodb_audit_logs" {
   sort_key_type      = "S"
   billing_mode       = "PAY_PER_REQUEST"
 
-  #
-  # PK y SK son la KeySchema -> NO repetir en attributes.
-  # audit_id NUNCA se usa en ningun GSI/KeySchema -> ELIMINADO (era atributo innecesario).
-  # Solo se declaran las claves de los 6 GSIs:
-  #   actor_uid, target_uid, session_id, report_request_id, participant_id, timestamp
-  #   action (hash), SK (range ya declarado en KeySchema)
-  #
   attributes = [
-    { name = "actor_uid", type = "S" },
-    { name = "action", type = "S" },
-    { name = "target_uid", type = "S" },
-    { name = "session_id", type = "S" },
-    { name = "report_request_id", type = "S" },
-    { name = "participant_id", type = "S" },
-    { name = "timestamp", type = "S" },
+    {
+      name = "actor_uid"
+      type = "S"
+    },
+    {
+      name = "action"
+      type = "S"
+    },
+    {
+      name = "target_uid"
+      type = "S"
+    },
+    {
+      name = "session_id"
+      type = "S"
+    },
+    {
+      name = "report_request_id"
+      type = "S"
+    },
+    {
+      name = "participant_id"
+      type = "S"
+    },
+    {
+      name = "timestamp"
+      type = "S"
+    }
   ]
 
   global_secondary_indexes = [
@@ -307,7 +395,7 @@ module "dynamodb_audit_logs" {
       projection_type = "ALL"
       read_capacity   = null
       write_capacity  = null
-    },
+    }
   ]
 
   tags = {
@@ -315,6 +403,10 @@ module "dynamodb_audit_logs" {
     Env     = local.env
   }
 }
+
+# ============================================================
+# DYNAMODB REPORT REQUESTS
+# ============================================================
 
 module "dynamodb_report_requests" {
   source = "../../modules/dynamodb_table"
@@ -326,18 +418,23 @@ module "dynamodb_report_requests" {
   sort_key_type      = "S"
   billing_mode       = "PAY_PER_REQUEST"
 
-  #
-  # requester_uid y sk son PK+SK -> NO repetir en attributes.
-  # Solo claves de los 3 GSIs:
-  #   status, requested_at  (GSI1 hash+range)
-  #   session_id            (GSI2 hash)
-  #   report_request_id     (GSI3 hash)
-  #
   attributes = [
-    { name = "report_request_id", type = "S" },
-    { name = "session_id", type = "S" },
-    { name = "status", type = "S" },
-    { name = "requested_at", type = "S" },
+    {
+      name = "report_request_id"
+      type = "S"
+    },
+    {
+      name = "session_id"
+      type = "S"
+    },
+    {
+      name = "status"
+      type = "S"
+    },
+    {
+      name = "requested_at"
+      type = "S"
+    }
   ]
 
   global_secondary_indexes = [
@@ -362,7 +459,7 @@ module "dynamodb_report_requests" {
       projection_type = "ALL"
       read_capacity   = null
       write_capacity  = null
-    },
+    }
   ]
 
   tags = {
@@ -371,52 +468,75 @@ module "dynamodb_report_requests" {
   }
 }
 
+# ============================================================
+# S3 REPORT PDFS
+# ============================================================
+
 module "s3_report_pdfs" {
   source = "../../modules/s3_private_bucket"
 
-  bucket_name = "${local.name_prefix}-report-pdfs"
+  bucket_name = var.report_pdfs_bucket_name != "" ? var.report_pdfs_bucket_name : "${local.name_prefix}-report-pdfs-${local.account_id}"
   env         = local.env
   project     = local.project
-  tags = {
-    Purpose = "Report PDFs storage"
-  }
+
 }
+
+# ============================================================
+# S3 RAW SESSIONS
+# ============================================================
 
 module "s3_sessions_raw" {
   source = "../../modules/s3_private_bucket"
 
-  bucket_name = "${local.name_prefix}-sessions-raw"
+  bucket_name = var.sessions_raw_bucket_name != "" ? var.sessions_raw_bucket_name : "${local.name_prefix}-sessions-raw-${local.account_id}"
   env         = local.env
   project     = local.project
-  tags = {
-    Purpose = "Session raw JSON data (when >350KB)"
-  }
+
 }
+
+# ============================================================
+# SSM PARAMETER STORE
+# ============================================================
 
 module "parameter_store" {
   source = "../../modules/parameter_store_params"
 
   env     = local.env
   project = local.project
+
   params = {
-    "/emotionlab/dev/cognito/user-pool-id"           = module.cognito.user_pool_id
-    "/emotionlab/dev/cognito/app-client-id"          = module.cognito.app_client_id
-    "/emotionlab/dev/s3/report-pdfs-bucket"          = module.s3_report_pdfs.bucket_name
-    "/emotionlab/dev/s3/sessions-raw-bucket"         = module.s3_sessions_raw.bucket_name
-    "/emotionlab/dev/dynamodb/users-table"           = module.dynamodb_users.table_name
-    "/emotionlab/dev/dynamodb/participants-table"    = module.dynamodb_participants.table_name
-    "/emotionlab/dev/dynamodb/sessions-table"        = module.dynamodb_sessions.table_name
-    "/emotionlab/dev/dynamodb/audit-table"           = module.dynamodb_audit_logs.table_name
+    "/emotionlab/dev/cognito/user-pool-id" = module.cognito.user_pool_id
+
+    "/emotionlab/dev/cognito/app-client-id" = module.cognito.app_client_id
+
+    "/emotionlab/dev/s3/report-pdfs-bucket" = module.s3_report_pdfs.bucket_name
+
+    "/emotionlab/dev/s3/sessions-raw-bucket" = module.s3_sessions_raw.bucket_name
+
+    "/emotionlab/dev/dynamodb/users-table" = module.dynamodb_users.table_name
+
+    "/emotionlab/dev/dynamodb/participants-table" = module.dynamodb_participants.table_name
+
+    "/emotionlab/dev/dynamodb/sessions-table" = module.dynamodb_sessions.table_name
+
+    "/emotionlab/dev/dynamodb/audit-table" = module.dynamodb_audit_logs.table_name
+
     "/emotionlab/dev/dynamodb/report-requests-table" = module.dynamodb_report_requests.table_name
-    "/emotionlab/dev/ses/sender-email"               = var.email_sender_address
+
+    "/emotionlab/dev/ses/sender-email" = var.email_sender_address
   }
 }
+
+# ============================================================
+# CLOUDWATCH LOG GROUPS
+# ============================================================
 
 module "cloudwatch_logs" {
   source = "../../modules/cloudwatch_log_groups"
 
   env     = local.env
   project = local.project
+
   log_groups = [
     {
       name              = "/emotionlab/dev/backend"
@@ -425,6 +545,118 @@ module "cloudwatch_logs" {
     {
       name              = "/emotionlab/dev/migration"
       retention_in_days = 180
-    },
+    }
   ]
+}
+
+# ============================================================
+# LAMBDA BACKEND
+# ============================================================
+
+module "lambda_backend" {
+  source = "../../modules/lambda"
+
+  function_name = local.backend_lambda_name
+  role_arn      = local.lambda_role
+
+  package_type = "Zip"
+  runtime      = "python3.13"
+  handler      = "lambda_handler.lambda_handler"
+
+  filename = "${path.root}/../../packages/backend.zip"
+
+  timeout     = 60
+  memory_size = 1024
+
+  environment_variables = {
+    JWT_SECRET            = var.jwt_secret
+    COGNITO_APP_CLIENT_ID = module.cognito.app_client_id
+
+    # La URL de /predict queda determinada por el API Gateway
+    # de EmotionLab.
+    PREDICTION_API_URL = "${module.api_gateway.api_endpoint}/predict"
+
+    STORAGE_BACKEND      = "dynamodb"
+    COGNITO_USER_POOL_ID = module.cognito.user_pool_id
+  }
+}
+
+# ============================================================
+# LAMBDA MODEL
+# ============================================================
+
+module "lambda_model" {
+  count = var.model_image_uri != "" ? 1 : 0
+
+  source = "../../modules/lambda"
+
+  function_name = local.model_lambda_name
+  role_arn      = local.lambda_role
+  package_type  = "Image"
+  image_uri     = var.model_image_uri
+  timeout       = 30
+  memory_size   = 1024
+}
+
+# ============================================================
+# LAMBDA SYNC
+# ============================================================
+
+module "lambda_sync" {
+  source = "../../modules/lambda"
+
+  function_name = local.sync_lambda_name
+  role_arn      = local.lambda_role
+
+  package_type = "Zip"
+  runtime      = "python3.12"
+  handler      = "lambda_function.lambda_handler"
+
+  filename = "${path.root}/../../packages/sync.zip"
+
+  timeout     = 120
+  memory_size = 512
+
+  environment_variables = {
+    PREDICTION_API_URL = "${module.api_gateway.api_endpoint}/predict"
+
+    # API EXTERNA DEL PROYECTO UNITY.
+    # Terraform NO crea ni administra esta API.
+    AWS_UNITY_DATA_URL = var.unity_data_url
+
+    DYNAMODB_TABLE_SESSIONS = module.dynamodb_sessions.table_name
+  }
+}
+
+# ============================================================
+# LAMBDA TEST
+# ============================================================
+
+module "lambda_test" {
+  source = "../../modules/lambda"
+
+  function_name = local.test_lambda_name
+  role_arn      = local.lambda_role
+
+  package_type = "Zip"
+  runtime      = "python3.13"
+  handler      = "lambda_function.lambda_handler"
+
+  filename = "${path.root}/../../packages/test.zip"
+
+  timeout     = 30
+  memory_size = 1024
+}
+
+# ============================================================
+# API GATEWAY
+# ============================================================
+module "api_gateway" {
+  source = "../../modules/api_gateway"
+
+  api_name            = "emotionlab-test-api"
+  backend_lambda_name = local.backend_lambda_name
+  model_lambda_name   = local.model_lambda_name
+  test_lambda_name    = local.test_lambda_name
+  model_enabled       = var.model_image_uri != ""
 }

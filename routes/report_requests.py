@@ -97,14 +97,27 @@ def list_requests():
     limit = int(request.args.get("limit") or 100)
     mine = request.args.get("mine", "").lower() in {"1", "true", "yes", "si"}
 
-    items, _next_key = _svc().list_requests(status=status, limit=limit)
-
-    # Si es profesor y pide "mine" o simplemente es profesor sin permiso admin, filtramos.
-    if actor_rol != ROLE_ADMIN:
-        items = [i for i in items if i.get("requester_uid") == actor_uid]
-    elif mine:
-        # Admin pide explícitamente las suyas
-        items = [i for i in items if i.get("requester_uid") == actor_uid]
+    # Si el usuario NO es admin, SIEMPRE se le devuelven solo sus
+    # solicitudes. Para garantizar que REJECTED / APPROVED /
+    # COMPLETED antiguos aparezcan incluso si el total supera el
+    # limit del scan global, usamos list_my_requests (query por PK
+    # requester_uid en vez de scan). Un profesor nunca debe ver las
+    # solicitudes de otros.
+    if actor_rol != ROLE_ADMIN or mine:
+        items, _next_key = _svc().list_my_requests(
+            actor_uid,
+            status=status,
+            limit=max(limit, 500),
+        )
+        if not mine and actor_rol == ROLE_ADMIN:
+            # Admin pidió "mine", pero list_my_requests ya filtra por
+            # requester_uid así que no necesitamos filtrar extra.
+            pass
+    else:
+        items, _next_key = _svc().list_requests(
+            status=status,
+            limit=limit,
+        )
 
     return jsonify({"items": items, "count": len(items)}), 200
 
