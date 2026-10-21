@@ -80,6 +80,12 @@ variable "tags" {
   default     = {}
 }
 
+variable "point_in_time_recovery_enabled" {
+  description = "Activa recuperación a un punto en el tiempo para proteger datos de la tabla."
+  type        = bool
+  default     = true
+}
+
 locals {
 
   # ============================================================
@@ -480,7 +486,7 @@ resource "aws_dynamodb_table" "table" {
   # ============================================================
 
   point_in_time_recovery {
-    enabled = false
+    enabled = var.point_in_time_recovery_enabled
   }
 
   # ============================================================

@@ -107,6 +107,7 @@ __pycache__/
 *.tfstate
 *.tfstate.*
 *.tfplan
+tfplan-*
 tfplan
 lambda_aws_backup.zip
 
@@ -114,6 +115,8 @@ lambda_aws_backup.zip
 # Artefactos locales de despliegue
 # ============================================================
 infrastructure/terraform/environments/dev/terraform.tfvars
+infrastructure/terraform/environments/*/terraform.tfvars
+infrastructure/terraform/environments/*/*.tfplan
 infrastructure.zip
 model_image.json
 model_manifest.json
@@ -121,4 +124,12 @@ backend_url.txt
 sync_url.txt
 test_url.txt
 lambda_backend_aws.zip
+
+# Artefactos generados o con datos/modelos empaquetados
+infrastructure/terraform/packages/*.zip
+infrastructure/terraform/modules/lambda/*.zip
+lambda_backend_source.zip
+requirements_lambda_only.zip
+ia/*.pkl
+model-image/ia/*.pkl
 

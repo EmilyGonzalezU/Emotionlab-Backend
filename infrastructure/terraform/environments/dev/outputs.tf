@@ -3,6 +3,36 @@ output "aws_region" {
   value       = var.aws_region
 }
 
+output "api_endpoint" {
+  description = "URL HTTPS base del API Gateway para configurar VITE_API_URL."
+  value       = module.api_gateway.api_endpoint
+}
+
+output "model_ecr_repository_url" {
+  description = "URI del repositorio ECR para publicar la imagen de inferencia."
+  value       = module.ecr_model.repository_uri
+}
+
+output "jwt_secret_arn" {
+  description = "ARN del secreto JWT vacío que debe poblarse desde Secrets Manager antes de invocar el backend."
+  value       = aws_secretsmanager_secret.jwt_secret.arn
+}
+
+output "frontend_url" {
+  description = "URL CloudFront del sitio si enable_frontend_hosting=true."
+  value       = var.enable_frontend_hosting ? module.frontend_hosting[0].url : null
+}
+
+output "frontend_bucket_name" {
+  description = "Bucket de sitio privado si enable_frontend_hosting=true."
+  value       = var.enable_frontend_hosting ? module.frontend_hosting[0].bucket_name : null
+}
+
+output "frontend_distribution_id" {
+  description = "Distribución CloudFront si enable_frontend_hosting=true."
+  value       = var.enable_frontend_hosting ? module.frontend_hosting[0].distribution_id : null
+}
+
 output "cognito_user_pool_id" {
   description = "ID del User Pool de Cognito"
   value       = module.cognito.user_pool_id
@@ -54,7 +84,7 @@ output "s3_sessions_raw_bucket" {
   value       = module.s3_sessions_raw.bucket_name
 }
 
-output "ses_verified_email" {
-  description = "Correo verificado en SES"
-  value       = var.email_sender_address
+output "ses_identity_arn" {
+  description = "ARN de identidad SES opcional; complete la verificación manual por correo."
+  value       = var.enable_ses_identity ? module.ses_identity[0].ses_identity_arn : null
 }

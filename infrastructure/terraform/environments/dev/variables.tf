@@ -5,19 +5,33 @@ variable "aws_region" {
   default = "us-east-1"
 
   validation {
-    condition = contains(
-      ["us-east-1", "us-east-2", "sa-east-1", "eu-west-1"],
-      var.aws_region
-    )
-
-    error_message = "Region AWS no valida."
+    condition     = can(regex("^[a-z]{2}(-gov)?-[a-z]+-[0-9]+$", var.aws_region))
+    error_message = "aws_region debe tener formato de región AWS, por ejemplo us-east-1."
   }
 }
 
-variable "lambda_role_name" {
-  description = "Nombre del rol IAM existente que utilizaran las Lambdas."
+variable "environment" {
+  description = "Entorno y parte del prefijo de los recursos."
   type        = string
-  default     = "LabRole"
+  default     = "dev"
+}
+
+variable "project_name" {
+  description = "Prefijo lógico de los recursos EmotionLab."
+  type        = string
+  default     = "emotionlab"
+}
+
+variable "create_lambda_role" {
+  description = "Crea un rol IAM dedicado para las funciones Lambda EmotionLab."
+  type        = bool
+  default     = true
+}
+
+variable "existing_lambda_role_arn" {
+  description = "ARN de rol de ejecución existente. Solo se usa si create_lambda_role=false."
+  type        = string
+  default     = ""
 }
 
 variable "data_bucket_name" {
@@ -44,23 +58,79 @@ variable "model_image_uri" {
   default     = ""
 }
 variable "jwt_secret" {
-  description = "Secreto JWT usado por el backend. No subir terraform.tfvars a Git."
+  description = "Obsoleto; se conserva para aceptar terraform.tfvars locales anteriores y no se usa. JWT_SECRET se lee desde Secrets Manager."
   type        = string
   sensitive   = true
-
-  validation {
-    condition     = length(trimspace(var.jwt_secret)) >= 32
-    error_message = "jwt_secret debe tener al menos 32 caracteres."
-  }
+  default     = ""
 }
 
 variable "unity_data_url" {
   description = "URL externa que utiliza Sync para obtener los datos provenientes de los proyectos Unity."
   type        = string
+  default     = ""
+}
 
+variable "cors_allowed_origins" {
+  description = "Orígenes frontend permitidos separados por coma; incluya el origen del sitio y null para Electron si corresponde."
+  type        = string
+  default     = "http://localhost:5173,http://127.0.0.1:5173,null"
+}
+
+variable "s3_versioning_enabled" {
+  description = "Activa versionado en buckets de datos EmotionLab."
+  type        = bool
+  default     = true
+}
+
+variable "s3_kms_key_arn" {
+  description = "ARN opcional de una CMK para cifrado SSE-KMS en los buckets. Vacío utiliza SSE-S3."
+  type        = string
+  default     = ""
+}
+
+variable "dynamodb_pitr_enabled" {
+  description = "Activa Point-in-Time Recovery para las tablas del entorno."
+  type        = bool
+  default     = true
+}
+
+variable "backend_log_retention_days" {
+  description = "Retención de logs backend y funciones Lambda."
+  type        = number
+  default     = 90
+}
+
+variable "migration_log_retention_days" {
+  description = "Retención de logs de importación/migración."
+  type        = number
+  default     = 180
+}
+
+variable "enable_frontend_hosting" {
+  description = "Crea un bucket privado y distribución CloudFront opcional para el frontend."
+  type        = bool
+  default     = false
+}
+
+variable "frontend_bucket_name" {
+  description = "Nombre opcional y globalmente único para el bucket del sitio."
+  type        = string
+  default     = ""
+}
+
+variable "frontend_domain_name" {
+  description = "Dominio opcional del sitio; requiere un certificado ACM emitido en us-east-1."
+  type        = string
+  default     = ""
+}
+
+variable "frontend_acm_certificate_arn" {
+  description = "ARN opcional de certificado ACM de us-east-1 para el dominio frontend."
+  type        = string
+  default     = ""
   validation {
-    condition     = trimspace(var.unity_data_url) != ""
-    error_message = "unity_data_url debe contener la URL del servicio de datos de Unity."
+    condition     = var.frontend_acm_certificate_arn == "" || can(regex("^arn:aws:acm:us-east-1:[0-9]{12}:certificate/.+", var.frontend_acm_certificate_arn))
+    error_message = "El certificado CloudFront debe ser un ARN ACM de us-east-1."
   }
 }
 
@@ -80,6 +150,12 @@ variable "ses_source_arn" {
   description = "ARN de identidad SES verificada. Opcional."
   type        = string
   default     = ""
+}
+
+variable "enable_ses_identity" {
+  description = "Crea una identidad de correo SES opcional. Debe verificarse desde el correo recibido."
+  type        = bool
+  default     = false
 }
 
 variable "model_ecr_repository_name" {

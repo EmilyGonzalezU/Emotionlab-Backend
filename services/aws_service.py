@@ -6,7 +6,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
-DEFAULT_UNITY_DATA_URL = "https://c2a1zfsvcj.execute-api.us-east-1.amazonaws.com/prod/data"
+DEFAULT_UNITY_DATA_URL = ""
 
 
 class AWSService:
@@ -17,6 +17,8 @@ class AWSService:
         self.timeout = timeout
 
     def fetch_sessions(self) -> dict[str, Any]:
+        if not self.data_url:
+            raise RuntimeError("AWS_UNITY_DATA_URL no está configurada; configure el endpoint externo de Unity.")
         try:
             with urlopen(self.data_url, timeout=self.timeout) as response:
                 payload = json.loads(response.read().decode("utf-8"))

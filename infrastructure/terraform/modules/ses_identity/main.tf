@@ -15,6 +15,13 @@ variable "env" {
 
 resource "aws_ses_email_identity" "sender" {
   email = var.ses_email_address
+
+  lifecycle {
+    precondition {
+      condition     = trimspace(var.ses_email_address) != ""
+      error_message = "Configure una dirección SES antes de habilitar la identidad."
+    }
+  }
 }
 
 output "ses_identity_arn" {

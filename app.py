@@ -81,7 +81,7 @@ from routes.audit_routes import audit_bp
 
 
 def _cors_origen_permitido(origin):
-    permitidos = {
+    permitidos = set(filter(None, (item.strip() for item in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",")))) or {
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://localhost:4173",
@@ -133,10 +133,7 @@ def create_app(services: dict | None = None) -> Flask:
         app,
         resources={
             r"/*": {
-                "origins": [
-                    "http://localhost:5173",
-                    "http://127.0.0.1:5173",
-                ],
+                "origins": list(filter(None, (item.strip() for item in os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")))),
                 "always_send": True,
                 "methods": [
                     "GET",
@@ -155,7 +152,7 @@ def create_app(services: dict | None = None) -> Flask:
                 "max_age": 3600,
             }
         },
-        supports_credentials=True,
+        supports_credentials=False,
     )
 
     @app.get("/health")

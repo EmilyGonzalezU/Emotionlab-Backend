@@ -30,21 +30,34 @@ variable "model_enabled" {
   default     = false
 }
 
-data "aws_caller_identity" "current" {}
+variable "backend_lambda_arn" {
+  type = string
+}
 
-data "aws_region" "current" {}
+variable "model_lambda_arn" {
+  type    = string
+  default = null
+}
 
-locals {
-  backend_lambda_arn = "arn:aws:lambda:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:function:${var.backend_lambda_name}"
+variable "test_lambda_arn" {
+  type = string
+}
 
-  model_lambda_arn = "arn:aws:lambda:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:function:${var.model_lambda_name}"
-
-  test_lambda_arn = "arn:aws:lambda:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:function:${var.test_lambda_name}"
+variable "cors_allowed_origins" {
+  type = list(string)
 }
 
 resource "aws_apigatewayv2_api" "this" {
   name          = var.api_name
   protocol_type = "HTTP"
+
+  cors_configuration {
+    allow_origins     = var.cors_allowed_origins
+    allow_methods     = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+    allow_headers     = ["Content-Type", "Authorization"]
+    allow_credentials = false
+    max_age           = 3600
+  }
 }
 
 # ============================================================
@@ -55,7 +68,7 @@ resource "aws_apigatewayv2_integration" "backend" {
   api_id = aws_apigatewayv2_api.this.id
 
   integration_type       = "AWS_PROXY"
-  integration_uri        = local.backend_lambda_arn
+  integration_uri        = var.backend_lambda_arn
   integration_method     = "POST"
   payload_format_version = "2.0"
   timeout_milliseconds   = 30000
@@ -101,7 +114,7 @@ resource "aws_apigatewayv2_integration" "model" {
   api_id = aws_apigatewayv2_api.this.id
 
   integration_type       = "AWS_PROXY"
-  integration_uri        = local.model_lambda_arn
+  integration_uri        = var.model_lambda_arn
   integration_method     = "POST"
   payload_format_version = "2.0"
   timeout_milliseconds   = 30000
@@ -138,7 +151,7 @@ resource "aws_apigatewayv2_integration" "test" {
   api_id = aws_apigatewayv2_api.this.id
 
   integration_type       = "AWS_PROXY"
-  integration_uri        = local.test_lambda_arn
+  integration_uri        = var.test_lambda_arn
   integration_method     = "POST"
   payload_format_version = "2.0"
   timeout_milliseconds   = 30000

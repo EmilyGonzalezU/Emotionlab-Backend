@@ -90,3 +90,23 @@ auditoría de calidad y los artefactos que requieren una decisión antes de
 eliminarse.
 
 La función Lambda HTTP se expone desde `lambda_handler.py`; la lógica de negocio permanece en los módulos Flask para compartir validaciones y servicios.
+# Portabilidad y despliegue en una cuenta AWS nueva
+
+La arquitectura, variables, permisos, comandos de instalación, pruebas, Electron, costos y limitaciones están documentados en [docs/PORTABILITY.md](docs/PORTABILITY.md).
+
+Empaquete funciones antes de planificar Terraform:
+
+```powershell
+python scripts/build_lambda_packages.py
+```
+
+La URL del frontend se configura desde el output Terraform `api_endpoint` con `npm run configure:api` en el proyecto hermano `Emotionlab-Frontend`. El build de producción exige `VITE_API_URL`.
+
+Guías específicas:
+
+- [Arquitectura](docs/ARCHITECTURE.md)
+- [Configuración](docs/CONFIGURATION.md)
+- [Despliegue](docs/DEPLOYMENT.md)
+- [Seguridad](docs/SECURITY.md)
+- [Pruebas](docs/TESTING.md)
+- [Resolución de problemas](docs/TROUBLESHOOTING.md)

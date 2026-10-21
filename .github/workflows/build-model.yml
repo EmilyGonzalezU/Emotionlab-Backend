@@ -1,43 +1,66 @@
-﻿name: Build and Push EmotionLab Model
+name: Build and publish EmotionLab model image
 
 on:
   workflow_dispatch:
+    inputs:
+      role_arn:
+        description: Optional IAM role ARN trusted for this GitHub repository via OIDC; leave empty for validation only
+        required: false
+        default: ""
+        type: string
+      publish_image:
+        description: Publish to ECR after validation (requires role_arn)
+        required: true
+        default: false
+        type: boolean
+      aws_region:
+        description: AWS region containing the Terraform ECR repository
+        required: true
+        default: us-east-1
+        type: string
+      repository:
+        description: ECR repository name created by Terraform
+        required: true
+        default: emotionlab-model
+        type: string
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
-          aws-region: us-east-1
-
-      - name: Login to Amazon ECR
+          python-version: "3.13"
+      - name: Verify model artifact and run a valid inference
+        run: |
+          python -m pip install -r model-image/requirements.txt
+          python scripts/verify_model_artifacts.py
+          python scripts/test_model_inference.py
+      - name: Require an OIDC role when publishing
+        if: ${{ inputs.publish_image }}
+        env:
+          ROLE_ARN: ${{ inputs.role_arn }}
+        run: test -n "$ROLE_ARN"
+      - uses: aws-actions/configure-aws-credentials@v4
+        if: ${{ inputs.publish_image }}
+        with:
+          role-to-assume: ${{ inputs.role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+      - uses: aws-actions/amazon-ecr-login@v2
+        if: ${{ inputs.publish_image }}
         id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Build and push model image
+      - name: Build and push
+        if: ${{ inputs.publish_image }}
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: emotionlab-model
-          IMAGE_TAG: latest
+          ECR_REPOSITORY: ${{ inputs.repository }}
+          IMAGE_TAG: ${{ github.sha }}-${{ github.run_attempt }}
         run: |
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG ./model-image
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-
-      - name: Show pushed image
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        run: |
-          echo "Imagen subida:"
-          echo "$ECR_REGISTRY/emotionlab-model:latest"
+          docker build --platform linux/amd64 -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" ./model-image
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          echo "Image URI: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"

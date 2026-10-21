@@ -75,7 +75,6 @@ class S3Service:
             "Bucket": bucket,
             "Key": key,
             "Body": body.getvalue() if isinstance(body, BytesIO) else body,
-            "ServerSideEncryption": "aws:kms",
         }
         if content_type:
             params["ContentType"] = content_type

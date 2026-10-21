@@ -41,7 +41,7 @@ class SESServices:
 
         self.sender_email = os.getenv(
             "SES_SENDER_ADDRESS",
-            os.getenv("SES_SENDER_EMAIL", os.getenv("EMAIL_SENDER", "em.gonzalezu@duocuc.cl")),
+            os.getenv("SES_SENDER_EMAIL", os.getenv("EMAIL_SENDER", "")),
         ).strip()
         self.sender_name = os.getenv(
             "SES_SENDER_NAME",

@@ -100,6 +100,9 @@ class CognitoService:
         except jose_jwt.JWTError as err:
             raise AuthenticationError("Token invalido o corrupto") from err
 
+        if unverified_header.get("alg") != "RS256":
+            raise AuthenticationError("Cognito solo admite tokens firmados con RS256")
+
         kid = unverified_header.get("kid")
         if not kid:
             raise AuthenticationError("Token no contiene kid")
@@ -113,10 +116,9 @@ class CognitoService:
             claims = jose_jwt.decode(
                 token,
                 public_key,
-                algorithms=[unverified_header.get("alg", "RS256")],
-                audience=self.app_client_id,
+                algorithms=["RS256"],
                 issuer=issuer,
-                options={"verify_at_hash": False},
+                options={"verify_at_hash": False, "verify_aud": False},
             )
         except jose_jwt.ExpiredSignatureError:
             raise AuthenticationError("Token expirado")
@@ -125,6 +127,21 @@ class CognitoService:
 
         if token_use and claims.get("token_use") != token_use:
             raise AuthenticationError(f"Token use no es {token_use}")
+
+        # Cognito ID tokens carry the app client in ``aud``; access tokens
+        # carry it in ``client_id`` and normally have no ``aud`` claim.
+        # Validate the appropriate claim explicitly after signature/issuer/
+        # expiry validation, rather than rejecting every access token.
+        actual_token_use = claims.get("token_use")
+        if actual_token_use == "id":
+            client_matches = claims.get("aud") == self.app_client_id
+        elif actual_token_use == "access":
+            client_matches = claims.get("client_id") == self.app_client_id
+        else:
+            raise AuthenticationError("Token Cognito debe ser de tipo access o id")
+
+        if not client_matches:
+            raise AuthenticationError("Token Cognito no pertenece al App Client configurado")
 
         return claims
 

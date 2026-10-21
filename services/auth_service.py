@@ -177,25 +177,12 @@ class AuthService:
             raise AuthenticationError("Token Cognito no contiene sub claim")
         user = self.user_service.get_user(cognito_sub)
         if not user:
-            # Fallback: sincronizar desde Cognito a DynamoDB si no existe
-            try:
-                cognito_user = self.cognito.admin_get_user(email) or {}
-                user = self.user_service._sync_from_cognito_to_dynamo(
-                    {
-                        "uid": cognito_sub,
-                        "username": cognito_sub,
-                        "nombre": (cognito_user.get("attributes") or {}).get("nombre"),
-                        "email": email,
-                        "rol": (cognito_user.get("attributes") or {}).get("custom:rol", "profesor"),
-                        "enabled": cognito_user.get("enabled", True),
-                        "user_status": cognito_user.get("user_status", "CONFIRMED"),
-                    }
-                )
-            except Exception as exc:
-                raise AuthenticationError(
-                    "Usuario autenticado en Cognito pero inexistente en DynamoDB; "
-                    "no se pudo sincronizar: %s" % exc
-                ) from exc
+            # Cognito authentication alone never grants an application role.
+            # Accounts must be provisioned by an administrator into both
+            # Cognito and DynamoDB; do not silently promote unknown users.
+            raise AuthenticationError(
+                "Usuario autenticado en Cognito pero no aprovisionado en EmotionLab"
+            )
 
         if not user.get("activo", False):
             if self.audit:
@@ -446,7 +433,10 @@ class AuthService:
 
         # Paso 1: Cognito RS256
         try:
-            claims = self.cognito.verify_token(token)
+            # HTTP Authorization must carry a Cognito access token; ID tokens
+            # are accepted only during the login exchange that validates them
+            # directly through CognitoService.
+            claims = self.cognito.verify_token(token, token_use="access")
             cognito_sub = claims.get("sub") or claims.get("username")
             cognito_email = claims.get("email") or claims.get("username")
             cognito_rol = (
