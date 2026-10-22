@@ -2,7 +2,6 @@ import inspect
 import logging
 import os
 import sys
-import traceback
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -457,7 +456,7 @@ def _register_error_handlers(app: Flask) -> None:
     def authentication_error(error):
         return jsonify(
             {
-                "error": str(error)
+                "error": "Credenciales inválidas o sesión expirada."
             }
         ), 401
 
@@ -465,7 +464,7 @@ def _register_error_handlers(app: Flask) -> None:
     def authorization_error(error):
         return jsonify(
             {
-                "error": str(error)
+                "error": "No tiene permisos para esta acción."
             }
         ), 403
 
@@ -474,15 +473,15 @@ def _register_error_handlers(app: Flask) -> None:
     def not_found(error):
         return jsonify(
             {
-                "error": str(error)
+                "error": "El recurso solicitado no existe."
             }
         ), 404
 
     @app.errorhandler(ValueError)
-    def invalid_request(error):
+    def invalid_request(_error):
         return jsonify(
             {
-                "error": str(error)
+                "error": "La solicitud contiene datos no validos."
             }
         ), 400
 
@@ -504,74 +503,7 @@ def _register_error_handlers(app: Flask) -> None:
 
     @app.errorhandler(Exception)
     def unhandled_exception(error):
-
-        if os.getenv("EMOTIONLAB_LOCAL_DIAGNOSTICS") == "1":
-            from botocore.exceptions import ClientError
-
-            print(
-                "===== AUTH LOGIN ERROR =====",
-                flush=True,
-            )
-
-            print(
-                f"Exception type: {type(error).__name__}",
-                flush=True,
-            )
-
-            if isinstance(error, ClientError):
-                aws_error = error.response.get(
-                    "Error",
-                    {}
-                )
-
-                metadata = error.response.get(
-                    "ResponseMetadata",
-                    {}
-                )
-
-                print(
-                    f"error_code: {aws_error.get('Code')}",
-                    flush=True,
-                )
-
-                print(
-                    f"http_status: {metadata.get('HTTPStatusCode')}",
-                    flush=True,
-                )
-
-                print(
-                    f"operation: {getattr(error, 'operation_name', None)}",
-                    flush=True,
-                )
-
-            else:
-                print(
-                    f"Exception message: {error}",
-                    flush=True,
-                )
-
-                print(
-                    "Traceback:",
-                    flush=True,
-                )
-
-                print(
-                    "".join(
-                        traceback.format_exception(error)
-                    ),
-                    end="",
-                    flush=True,
-                )
-
-            print(
-                "=============================",
-                flush=True,
-            )
-
-        app.logger.exception(
-            "Error no manejado: %s",
-            error,
-        )
+        app.logger.error("Error interno no controlado (tipo=%s)", type(error).__name__)
 
         try:
             cw = app.extensions["services"].get(
@@ -581,24 +513,8 @@ def _register_error_handlers(app: Flask) -> None:
             if cw is not None:
                 cw.put_event(
                     level="ERROR",
-                    message=(
-                        f"UNHANDLED_EXCEPTION: "
-                        f"{type(error).__name__}: {error}"
-                    ),
-                    context={
-                        "path": (
-                            getattr(
-                                getattr(
-                                    error,
-                                    "__traceback__",
-                                    None,
-                                ),
-                                "tb_frame",
-                                None,
-                            )
-                            and error.__traceback__.tb_frame.f_code.co_filename
-                        )
-                    },
+                    message="UNHANDLED_EXCEPTION",
+                    context={"exception_type": type(error).__name__},
                 )
 
         except Exception:

@@ -88,7 +88,7 @@ class SSMConfigService:
         except self._ssm.exceptions.ParameterNotFound:
             return None
         except Exception as err:
-            print(f"[SSM] Error leyendo parametro {full_name}: {err}", flush=True)
+            print(f"[SSM] Error leyendo parámetro (tipo={type(err).__name__})", flush=True)
             return None
 
     # ------------------------------------------------------------------
@@ -107,7 +107,7 @@ class SSMConfigService:
         try:
             response = self._secrets.get_secret_value(SecretId=secret_id)
         except Exception as err:
-            print(f"[SecretsManager] Error leyendo {secret_id}: {err}", flush=True)
+            print(f"[SecretsManager] Error leyendo secreto (tipo={type(err).__name__})", flush=True)
             return None
 
         raw = response.get("SecretString")

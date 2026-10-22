@@ -35,10 +35,7 @@ def login():
     email, password = body.get("email"), body.get("password")
     if not email or not password:
         return jsonify({"error": "email y password son obligatorios"}), 400
-    try:
-        result = _auth_service().login(email, password)
-    except Exception:
-        raise
+    result = _auth_service().login(email, password)
     return jsonify(result), 200
 
 
@@ -70,8 +67,9 @@ def confirm_new_password():
         return jsonify(result), 200
     except ValueError as ve:
         return jsonify({"error": str(ve)}), 400
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    except Exception as error:
+        current_app.logger.error("Error al completar challenge Cognito (tipo=%s)", type(error).__name__)
+        return jsonify({"error": "No se pudo completar el cambio de contraseña."}), 500
 
 
 # ============================================================
@@ -87,11 +85,9 @@ def forgot_password():
     try:
         result = _auth_service().forgot_password(email)
         return jsonify(result), 200
-    except Exception as e:
-        msg = str(e).lower()
-        if "not found" in msg or "no encontrado" in msg or "username/client" in msg:
-            return jsonify({"mensaje": "Si el email existe, se ha enviado un código de recuperación"}), 200
-        return jsonify({"error": str(e)}), 500
+    except Exception as error:
+        current_app.logger.error("Error en recuperación de contraseña (tipo=%s)", type(error).__name__)
+        return jsonify({"mensaje": "Si el correo existe, recibirá instrucciones de recuperación."}), 200
 
 
 # ============================================================
@@ -133,8 +129,9 @@ def reset_password():
                 "error": "Se requiere token (legacy) o bien email + code (Cognito)",
             }), 400
         return jsonify(result), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
+    except Exception as error:
+        current_app.logger.error("Error al restablecer contraseña (tipo=%s)", type(error).__name__)
+        return jsonify({"error": "No se pudo restablecer la contraseña. Verifique el código e inténtelo nuevamente."}), 400
 
 
 # ============================================================
@@ -163,8 +160,9 @@ def change_password():
         return jsonify(result), 200
     except ValueError as ve:
         return jsonify({"error": str(ve)}), 400
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    except Exception as error:
+        current_app.logger.error("Error al cambiar contraseña (tipo=%s)", type(error).__name__)
+        return jsonify({"error": "No se pudo cambiar la contraseña."}), 500
 
 
 # ============================================================

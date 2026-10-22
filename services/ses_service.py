@@ -88,10 +88,10 @@ class SESServices:
             )
             return True
         except ClientError as err:
-            print(f"[SES] Error enviando correo: {err}", flush=True)
+            print(f"[SES] Error enviando correo (tipo={type(err).__name__})", flush=True)
             return False
         except Exception as err:
-            print(f"[SES] Error inesperado: {err}", flush=True)
+            print(f"[SES] Error inesperado (tipo={type(err).__name__})", flush=True)
             return False
 
     # ------------------------------------------------------------------

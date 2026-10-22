@@ -13,7 +13,12 @@ variable "aws_region" {
 variable "environment" {
   description = "Entorno y parte del prefijo de los recursos."
   type        = string
-  default     = "dev"
+  default     = "portable"
+
+  validation {
+    condition     = lower(var.environment) != "dev"
+    error_message = "El root portable no puede usar environment=dev; use un nombre aislado como portable o awsacademy."
+  }
 }
 
 variable "project_name" {
@@ -160,5 +165,5 @@ variable "enable_ses_identity" {
 
 variable "model_ecr_repository_name" {
   type    = string
-  default = "emotionlab-model"
+  default = "emotionlab-model-portable"
 }

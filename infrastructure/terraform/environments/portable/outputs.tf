@@ -14,7 +14,7 @@ output "model_ecr_repository_url" {
 }
 
 output "jwt_secret_arn" {
-  description = "ARN del secreto JWT vacío que debe poblarse desde Secrets Manager antes de invocar el backend."
+  description = "ARN del secreto JWT generado por Terraform en Secrets Manager. El state debe mantenerse cifrado y con acceso restringido."
   value       = aws_secretsmanager_secret.jwt_secret.arn
 }
 

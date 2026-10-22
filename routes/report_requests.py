@@ -72,7 +72,8 @@ def create_request():
     except ValueError as ve:
         return jsonify({"error": str(ve)}), 400
     except Exception as exc:
-        return jsonify({"error": f"Error creando solicitud: {exc}"}), 500
+        current_app.logger.error("Error creando solicitud de informe (tipo=%s)", type(exc).__name__)
+        return jsonify({"error": "No se pudo crear la solicitud de informe."}), 500
 
     return jsonify(req), 201
 
@@ -191,7 +192,8 @@ def review_request(request_id):
     except ValueError as ve:
         return jsonify({"error": str(ve)}), 400
     except Exception as exc:
-        return jsonify({"error": f"Error revisando solicitud: {exc}"}), 500
+        current_app.logger.error("Error revisando solicitud de informe (tipo=%s)", type(exc).__name__)
+        return jsonify({"error": "No se pudo revisar la solicitud de informe."}), 500
 
     return jsonify(result), 200
 
@@ -228,6 +230,7 @@ def download_request(request_id):
         from core.exceptions import AuthorizationError
         raise AuthorizationError(str(pe))
     except Exception as exc:
-        return jsonify({"error": f"Error generando URL de descarga: {exc}"}), 500
+        current_app.logger.error("Error generando URL de descarga (tipo=%s)", type(exc).__name__)
+        return jsonify({"error": "No se pudo generar el enlace de descarga."}), 500
 
     return jsonify({"download_url": url, "expires_in_seconds": 300}), 200

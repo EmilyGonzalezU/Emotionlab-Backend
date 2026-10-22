@@ -363,16 +363,8 @@ class ImportService:
                     "ERROR IMPORTANDO SESIÓN"
                 )
                 print(
-                    "session_id:",
-                    session_id,
-                )
-                print(
-                    "s3_key:",
-                    source_key,
-                )
-                print(
-                    "ERROR:",
-                    error,
+                    "Error interno de importación "
+                    f"(tipo={type(error).__name__})",
                 )
                 print(
                     "=============================="
@@ -391,9 +383,8 @@ class ImportService:
                 except Exception as save_error:
 
                     print(
-                        "ERROR GUARDANDO SESIÓN "
-                        "CON ERROR:",
-                        save_error,
+                        "Error guardando sesión de importación "
+                        f"(tipo={type(save_error).__name__})"
                     )
 
                 result[
@@ -526,8 +517,8 @@ class ImportService:
         except Exception as error:
 
             print(
-                f"Error reintentando predicción "
-                f"{session_id}: {error}"
+                "Error reintentando predicción "
+                f"(tipo={type(error).__name__})"
             )
 
             return "error"
@@ -619,8 +610,8 @@ class ImportService:
         except Exception as error:
 
             print(
-                f"Error creando sesión pendiente: "
-                f"{error}"
+                "Error creando sesión pendiente "
+                f"(tipo={type(error).__name__})"
             )
 
             # ---------------------------------------------
@@ -641,9 +632,8 @@ class ImportService:
             except Exception as save_error:
 
                 print(
-                    "Error guardando estado "
-                    "de importación:",
-                    save_error,
+                    "Error guardando estado de importación "
+                    f"(tipo={type(save_error).__name__})"
                 )
 
             result[

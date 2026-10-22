@@ -271,7 +271,7 @@ class UserService:
                         cognito_attrs,
                     )
                 except Exception as err:
-                    print(f"[UserService] Error actualizando Cognito: {err}", flush=True)
+                    print(f"[UserService] Error actualizando Cognito (tipo={type(err).__name__})", flush=True)
 
             if "activo" in changes:
                 try:
@@ -284,7 +284,7 @@ class UserService:
                             user.get("cognito_username") or user.get("email") or uid,
                         )
                 except Exception as err:
-                    print(f"[UserService] Error enable/disable Cognito: {err}", flush=True)
+                    print(f"[UserService] Error enable/disable Cognito (tipo={type(err).__name__})", flush=True)
 
         self.dynamo.update_item(self.table, {"uid": uid}, changes)
         invalidate_user_cache(uid)
@@ -332,7 +332,7 @@ class UserService:
                     user.get("cognito_username") or user.get("email") or uid
                 )
             except Exception as err:
-                print(f"[UserService] Error eliminando Cognito user: {err}", flush=True)
+                print(f"[UserService] Error eliminando usuario Cognito (tipo={type(err).__name__})", flush=True)
                 
         self.dynamo.delete_item(self.table, {"uid": uid})
         invalidate_user_cache(uid)
@@ -435,7 +435,7 @@ class UserService:
                     **audit_extra,
                 )
         except Exception as err:
-            print(f"[UserService.log_activity] Error registrando auditoria: {err}", flush=True)
+            print(f"[UserService.log_activity] Error registrando auditoria (tipo={type(err).__name__})", flush=True)
         finally:
             invalidate_activity_cache()
 
@@ -476,5 +476,5 @@ class UserService:
                 result.append(enriched)
             return result
         except Exception as err:
-            print(f"[UserService.list_activity] Error: {err}", flush=True)
+            print(f"[UserService.list_activity] Error (tipo={type(err).__name__})", flush=True)
             return []

@@ -1,5 +1,5 @@
 aws_region           = "us-east-1"
-environment          = "dev"
+environment          = "portable"
 project_name         = "emotionlab"
 create_lambda_role   = true
 existing_lambda_role_arn = ""
@@ -10,6 +10,7 @@ enable_ses_identity  = false
 model_image_uri      = ""
 unity_data_url       = ""
 cors_allowed_origins = "http://localhost:5173,http://127.0.0.1:5173,null"
+model_ecr_repository_name = "emotionlab-model-portable"
 s3_versioning_enabled = true
 s3_kms_key_arn       = ""
 dynamodb_pitr_enabled = true

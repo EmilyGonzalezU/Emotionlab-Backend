@@ -6,6 +6,10 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.6"
+    }
   }
 }
 
@@ -141,7 +145,7 @@ resource "aws_iam_role_policy" "lambda_app" {
     Statement = concat([
       { Effect = "Allow", Action = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:Query", "dynamodb:Scan", "dynamodb:BatchWriteItem"], Resource = concat([for arn in [module.dynamodb_users.table_arn, module.dynamodb_participants.table_arn, module.dynamodb_sessions.table_arn, module.dynamodb_audit_logs.table_arn, module.dynamodb_report_requests.table_arn] : "${arn}/*"], [module.dynamodb_users.table_arn, module.dynamodb_participants.table_arn, module.dynamodb_sessions.table_arn, module.dynamodb_audit_logs.table_arn, module.dynamodb_report_requests.table_arn]) },
       { Effect = "Allow", Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"], Resource = ["${module.s3_data.bucket_arn}/*", "${module.s3_report_pdfs.bucket_arn}/*", "${module.s3_sessions_raw.bucket_arn}/*"] },
-      { Effect = "Allow", Action = ["cognito-idp:AdminCreateUser", "cognito-idp:AdminUpdateUserAttributes", "cognito-idp:AdminSetUserPassword", "cognito-idp:AdminDisableUser", "cognito-idp:AdminEnableUser", "cognito-idp:AdminDeleteUser", "cognito-idp:AdminInitiateAuth", "cognito-idp:AdminRespondToAuthChallenge"], Resource = [module.cognito.user_pool_arn] },
+      { Effect = "Allow", Action = ["cognito-idp:AdminCreateUser", "cognito-idp:AdminGetUser", "cognito-idp:AdminUpdateUserAttributes", "cognito-idp:AdminSetUserPassword", "cognito-idp:AdminDisableUser", "cognito-idp:AdminEnableUser", "cognito-idp:AdminDeleteUser", "cognito-idp:AdminInitiateAuth", "cognito-idp:AdminRespondToAuthChallenge", "cognito-idp:ListUsers"], Resource = [module.cognito.user_pool_arn] },
       { Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = aws_secretsmanager_secret.jwt_secret.arn },
       { Effect = "Allow", Action = ["logs:CreateLogStream", "logs:PutLogEvents"], Resource = "arn:aws:logs:${var.aws_region}:${local.account_id}:log-group:/aws/lambda/${local.backend_lambda_name}:*" },
     ], var.email_sender_address != "" ? [{ Effect = "Allow", Action = ["ses:SendEmail"], Resource = var.ses_source_arn != "" ? var.ses_source_arn : "arn:aws:ses:${var.aws_region}:${local.account_id}:identity/${var.email_sender_address}" }] : [], var.s3_kms_key_arn != "" ? [{ Effect = "Allow", Action = ["kms:Decrypt", "kms:GenerateDataKey"], Resource = var.s3_kms_key_arn }] : [])
@@ -153,6 +157,17 @@ resource "aws_secretsmanager_secret" "jwt_secret" {
   recovery_window_in_days = 30
   tags                    = { Project = local.project, Environment = local.env }
 }
+
+resource "random_password" "jwt_secret" {
+  length  = 64
+  special = false
+}
+
+resource "aws_secretsmanager_secret_version" "jwt_secret" {
+  secret_id     = aws_secretsmanager_secret.jwt_secret.id
+  secret_string = random_password.jwt_secret.result
+}
+
 module "ecr_model" {
   source = "../../modules/ecr"
 

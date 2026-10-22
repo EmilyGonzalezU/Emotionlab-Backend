@@ -333,7 +333,7 @@ class SessionService:
 
             print(
                 "Error resolviendo clave de sesión "
-                f"{session_id}: {error}"
+                f"(tipo={type(error).__name__})"
             )
 
             return None
@@ -390,8 +390,8 @@ class SessionService:
         except Exception as error:
 
             print(
-                "Error buscando sesión por "
-                f"session_id {session_id}: {error}"
+                "Error buscando sesión "
+                f"(tipo={type(error).__name__})"
             )
 
         # Compatibilidad legacy
@@ -451,8 +451,8 @@ class SessionService:
         except Exception as error:
 
             print(
-                "Error buscando source_key "
-                f"{source_key}: {error}"
+                "Error buscando sesión por source_key "
+                f"(tipo={type(error).__name__})"
             )
 
             return None
@@ -943,8 +943,8 @@ class SessionService:
         except Exception as error:
 
             print(
-                "Error listando sesiones: "
-                f"{error}"
+                "Error listando sesiones "
+                f"(tipo={type(error).__name__})"
             )
 
             try:

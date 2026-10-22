@@ -167,7 +167,7 @@ class AuthService:
         except Exception as exc:
             if self.audit:
                 try:
-                    self.audit.log_login_fail(email, reason=f"verify_fail:{exc}")
+                    self.audit.log_login_fail(email, reason="cognito_token_verification_failed")
                 except Exception:
                     pass
             raise InvalidCredentials("Correo o contraseÃ±a incorrectos.") from exc
@@ -323,9 +323,9 @@ class AuthService:
                 },
             )
         except Exception as exc:
-            print(
-                f"[AuthService] No se pudo sincronizar user_status en DynamoDB: {exc}",
-                flush=True,
+            logging.getLogger(__name__).warning(
+                "No se pudo sincronizar el estado Cognito en DynamoDB (tipo=%s)",
+                type(exc).__name__,
             )
 
         try:
@@ -506,7 +506,10 @@ class AuthService:
                         pass
             except Exception as exc:
                 # Cognito UserNotFoundException: no propagar (prevenir enumeraciÃ³n)
-                print(f"[AUTH] forgot_password intern error: {exc}")
+                logging.getLogger(__name__).warning(
+                    "Fallo en solicitud de recuperación de contraseña (tipo=%s)",
+                    type(exc).__name__,
+                )
         return {
             "mensaje": (
                 "Si el correo existe en nuestro sistema, te enviamos un cÃ³digo "
@@ -560,7 +563,7 @@ class AuthService:
                         "Solicita uno nuevo."
                     ) from exc
                 if "password" in msg and "not" in msg and ("match" in msg or "require" in msg):
-                    raise ValueError(str(exc)) from exc
+                    raise ValueError("La nueva contraseña no cumple los requisitos de Cognito.") from exc
                 raise ValueError(
                     "No se pudo actualizar la contraseÃ±a. Intenta de nuevo."
                 ) from exc
@@ -609,7 +612,7 @@ class AuthService:
                     )
                 except Exception as exc:
                     raise ValueError(
-                        f"No se pudo actualizar la contraseÃ±a en Cognito: {exc}"
+                        "No se pudo actualizar la contraseña. Verifique los requisitos e inténtelo nuevamente."
                     ) from exc
             if self.ses and email_from_user:
                 try:
@@ -652,7 +655,7 @@ class AuthService:
             if "incorrect" in msg and "password" in msg:
                 raise ValueError("ContraseÃ±a actual incorrecta.") from exc
             if "password" in msg and "not" in msg and ("match" in msg or "require" in msg):
-                raise ValueError(str(exc)) from exc
+                raise ValueError("La nueva contraseña no cumple los requisitos de Cognito.") from exc
             raise
         return {"mensaje": "ContraseÃ±a actualizada exitosamente."}
 
@@ -688,7 +691,7 @@ class AuthService:
     ) -> bool:
         """EnvÃ­a correo de bienvenida con contraseÃ±a temporal generada por Cognito."""
         if self.ses is None:
-            print(f"[AUTH][WARN] SESService no disponible; no se envÃ­a bienvenida a {to_email}")
+            logging.getLogger(__name__).warning("SES no está disponible; se omitió el correo de bienvenida.")
             return False
         try:
             self.ses.send_welcome_with_temp_password(
@@ -699,13 +702,15 @@ class AuthService:
             )
             return True
         except Exception as exc:
-            print(f"[AUTH][ERROR] send_welcome_temporary_password fallÃ³: {exc}")
+            logging.getLogger(__name__).error(
+                "Fallo al enviar correo de bienvenida (tipo=%s)", type(exc).__name__
+            )
             return False
     def enviar_correo(self, destinatario: str, link: str) -> bool:
         """Wrapper legacy (mantenido para compatibilidad). Delega a SES si puede."""
         if self.ses is None:
             # Fallback: imprimir en logs (nunca usar Resend).
-            print(f"[AUTH][LEGACY] enviar_correo() sin SES; link no enviado a {destinatario}")
+            logging.getLogger(__name__).warning("SES no está disponible; se omitió el correo de recuperación legacy.")
             return False
         try:
             self.ses.send_custom_html(
@@ -728,5 +733,7 @@ class AuthService:
             )
             return True
         except Exception as exc:
-            print(f"[AUTH][ERROR] enviar_correo() fallÃ³ SES: {exc}")
+            logging.getLogger(__name__).error(
+                "Fallo al enviar correo legacy (tipo=%s)", type(exc).__name__
+            )
             return False

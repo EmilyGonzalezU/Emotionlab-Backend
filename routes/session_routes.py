@@ -108,10 +108,7 @@ def get_sessions_by_participant(participant_id):
 
     except Exception:
 
-        current_app.logger.exception(
-            "Error obteniendo sesiones del participante %s",
-            participant_id,
-        )
+        current_app.logger.error("Error obteniendo sesiones del participante")
 
         return jsonify(
             {
@@ -254,10 +251,7 @@ def update_session(session_id):
 
     except Exception:
 
-        current_app.logger.exception(
-            "Error actualizando sesión %s",
-            session_id,
-        )
+        current_app.logger.error("Error actualizando sesión")
 
         return jsonify(
             {

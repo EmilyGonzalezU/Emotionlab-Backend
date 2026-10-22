@@ -105,13 +105,6 @@ def create_participant():
 
     body = request.get_json(silent=True) or {}
 
-    current_app.logger.warning(
-        "DEBUG PARTICIPANT | content_type=%s | raw=%s | json=%s",
-        request.content_type,
-        request.get_data(as_text=True),
-        body,
-    )
-
     nombre = body.get("nombre")
     if not isinstance(nombre, str) or not nombre.strip():
         return jsonify(

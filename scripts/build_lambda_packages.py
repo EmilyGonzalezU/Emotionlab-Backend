@@ -33,7 +33,7 @@ def build() -> None:
         shutil.copytree(stage, sync_stage)
         (sync_stage / "app.py").unlink()
         (sync_stage / "lambda_handler.py").unlink()
-        shutil.copy2(ROOT / "lambda-sync" / "lambda_function.py", sync_stage / "lambda_function.py")
+        shutil.copy2(ROOT / "lambda_sync" / "lambda_function.py", sync_stage / "lambda_function.py")
         _zip_tree(sync_stage, OUT / "sync.zip")
 
         test_stage = Path(temp) / "test"

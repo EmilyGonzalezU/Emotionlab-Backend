@@ -11,7 +11,6 @@ Gestiona:
 from __future__ import annotations
 
 import os
-import logging
 from typing import Any, Mapping, Optional
 
 import boto3
@@ -25,9 +24,6 @@ from core.exceptions import (
     InvalidCredentials,
     UserNotFound,
 )
-
-
-logger = logging.getLogger(__name__)
 
 
 class CognitoService:
@@ -190,7 +186,6 @@ class CognitoService:
             user_attributes.append({"Name": "custom:legacy_uid", "Value": legacy_uid})
 
         username = email.lower()
-        logger.info("[COGNITO] Creating user with email=%s", username)
         try:
             resp = self.idp.admin_create_user(
                 UserPoolId=self.user_pool_id,
@@ -203,11 +198,6 @@ class CognitoService:
 
         user = resp.get("User", {})
         attributes = {a["Name"]: a["Value"] for a in user.get("Attributes", [])}
-        logger.info(
-            "[COGNITO] AdminCreateUser completed email=%s status=%s",
-            username,
-            user.get("UserStatus"),
-        )
         return {
             "cognito_username": user.get("Username"),
             "uid": attributes.get("sub", user.get("Username")),
@@ -388,7 +378,7 @@ class CognitoService:
                 },
             )
         except self.idp.exceptions.InvalidPasswordException as err:
-            raise ValueError(f"Contrasena no cumple los requisitos: {err}") from err
+            raise ValueError("La nueva contrasena no cumple los requisitos configurados.") from err
         except self.idp.exceptions.ExpiredCodeException as err:
             raise AuthenticationError("Sesion expirada; vuelve a iniciar sesion") from err
 
@@ -444,7 +434,7 @@ class CognitoService:
             )
         except self.idp.exceptions.InvalidPasswordException as err:
             raise ValueError(
-                f"La nueva contrasena no cumple los requisitos de Cognito: {err}"
+                "La nueva contrasena no cumple los requisitos configurados."
             ) from err
         except self.idp.exceptions.ExpiredCodeException as err:
             raise AuthenticationError(
@@ -517,7 +507,7 @@ class CognitoService:
         except self.idp.exceptions.ExpiredCodeException as err:
             raise ValueError("Codigo expirado; solicita uno nuevo") from err
         except self.idp.exceptions.InvalidPasswordException as err:
-            raise ValueError(f"Contrasena no cumple los requisitos: {err}") from err
+            raise ValueError("La nueva contrasena no cumple los requisitos configurados.") from err
         except self.idp.exceptions.UserNotFoundException as err:
             raise ValueError("Usuario no encontrado") from err
 
@@ -543,4 +533,4 @@ class CognitoService:
         except self.idp.exceptions.NotAuthorizedException as err:
             raise InvalidCredentials("Contrasena actual incorrecta o token invalido") from err
         except self.idp.exceptions.InvalidPasswordException as err:
-            raise ValueError(f"Contrasena no cumple los requisitos: {err}") from err
+            raise ValueError("La nueva contrasena no cumple los requisitos configurados.") from err

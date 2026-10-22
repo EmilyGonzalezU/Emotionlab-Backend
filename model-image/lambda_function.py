@@ -33,7 +33,7 @@ def lambda_handler(event, context):
         }
 
     except ValueError as error:
-        logger.warning("Error de validación: %s", error)
+        logger.warning("Solicitud de predicción inválida (tipo=%s)", type(error).__name__)
 
         return {
             "statusCode": 400,
@@ -43,14 +43,14 @@ def lambda_handler(event, context):
             "body": json.dumps(
                 {
                     "ok": False,
-                    "error": str(error)
+                    "error": "La solicitud de predicción no es válida."
                 },
                 ensure_ascii=False
             )
         }
 
-    except Exception:
-        logger.exception("Error interno en Lambda")
+    except Exception as error:
+        logger.error("Error interno en Lambda (tipo=%s)", type(error).__name__)
 
         return {
             "statusCode": 500,

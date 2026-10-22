@@ -512,9 +512,8 @@ class ReportRequestService:
         except Exception as error:
 
             print(
-                "Error buscando solicitud por "
-                f"report_request_id {request_id}: "
-                f"{error}"
+                "Error buscando solicitud de informe "
+                f"(tipo={type(error).__name__})"
             )
 
         return None
@@ -1264,9 +1263,7 @@ class ReportRequestService:
 
             updates = {
                 "status": STATUS_ERROR,
-                "generation_error": str(
-                    exc
-                ),
+                "generation_error": "No se pudo generar el informe.",
                 "updated_at": (
                     DynamoDBService.now_iso()
                 ),

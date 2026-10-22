@@ -21,7 +21,7 @@ on:
       repository:
         description: ECR repository name created by Terraform
         required: true
-        default: emotionlab-model
+        default: emotionlab-model-portable
         type: string
 
 permissions:

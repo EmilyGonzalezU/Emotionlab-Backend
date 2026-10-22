@@ -459,8 +459,8 @@ class DynamoDBService:
             print(
                 "[DYNAMODB] UPDATE ERROR "
                 f"table={table_name} "
-                f"key={dict(key)} "
-                f"error={exc!r}",
+                f"key_fields={sorted(key.keys())} "
+                f"exception_type={type(exc).__name__}",
                 flush=True,
             )
 

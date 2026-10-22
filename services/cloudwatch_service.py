@@ -43,7 +43,7 @@ class CloudWatchLogService:
                 self._client = boto3.client("logs", region_name=region)
                 self._ensure_log_stream_exists()
             except Exception as err:
-                print(f"[CLOUDWATCH] No se pudo inicializar: {err}", flush=True)
+                print(f"[CLOUDWATCH] No se pudo inicializar (tipo={type(err).__name__})", flush=True)
                 self._enabled = False
 
         self._initialized = True
@@ -107,9 +107,9 @@ class CloudWatchLogService:
                 response = self._client.put_log_events(**kwargs)
                 self.sequence_token = response.get("nextSequenceToken")
             except Exception as err2:
-                print(f"[CLOUDWATCH] PutLogEvents failed: {err2}", flush=True)
+                print(f"[CLOUDWATCH] PutLogEvents failed (tipo={type(err2).__name__})", flush=True)
         except Exception as err:
-            print(f"[CLOUDWATCH] PutLogEvents failed: {err}", flush=True)
+            print(f"[CLOUDWATCH] PutLogEvents failed (tipo={type(err).__name__})", flush=True)
 
     # ------------------------------------------------------------------
     # API publica de niveles de log
@@ -123,9 +123,9 @@ class CloudWatchLogService:
         self._put([self._event("WARN", msg, **fields)])
 
     def error(self, msg: str, exception: Optional[BaseException] = None, **fields) -> None:
-        exc = str(exception) if exception else None
-        print(f"[ERROR] {msg}: {exc or ''}", file=sys.stderr, flush=True)
-        self._put([self._event("ERROR", msg, exception=exc, **fields)])
+        exception_type = type(exception).__name__ if exception else None
+        print(f"[ERROR] {msg}", file=sys.stderr, flush=True)
+        self._put([self._event("ERROR", msg, exception_type=exception_type, **fields)])
 
     def debug(self, msg: str, **fields) -> None:
         if os.getenv("DEBUG_LOGS") in ("1", "true", "True"):
