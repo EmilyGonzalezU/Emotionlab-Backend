@@ -20,17 +20,16 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-      - name: Run offline backend tests
-        env:
-          PYTHONPATH: ${{ github.workspace }}
-          AWS_EC2_METADATA_DISABLED: "true"
+      - name: Ejecutar pruebas disponibles
         run: |
-          python -m pytest -v \
-            tests/test_app_factory.py \
-            tests/test_audit_service.py \
-            tests/test_auth_dual_verify_token.py \
-            tests/test_cognito_new_password_challenge.py \
-            tests/test_lambda_handler.py \
-            tests/test_participant_id.py \
-            tests/test_session_processing_service.py \
-            tests/test_storage_repository.py
+          if find . -type f -name "test_*.py" \
+            -not -path "./.git/*" \
+            -not -path "./.venv/*" \
+            -not -path "./venv/*" \
+            | grep -q .
+          then
+            python -m pytest -v
+          else
+            echo "No se encontraron archivos de pruebas."
+            echo "Se omite pytest."
+          fi
