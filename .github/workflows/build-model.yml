@@ -79,7 +79,6 @@ jobs:
             --push \
             -f model-v2-image/Dockerfile \
             -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" \
-            -t "$ECR_REGISTRY/$ECR_REPOSITORY:latest" \
             .
 
-          echo "Published: $ECR_REGISTRY/$ECR_REPOSITORY:latest"
+          echo "Published: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
