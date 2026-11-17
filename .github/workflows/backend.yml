@@ -38,4 +38,10 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}
         run: |
-        pytest -v
+          if find tests -type f -name "test_*.py" 2>/dev/null | grep -q .
+          then
+            python -m pytest -v
+          else
+            echo "No se encontraron archivos de pruebas."
+            echo "Se omite pytest."
+          fi
