@@ -471,6 +471,12 @@ class DynamoDBService:
         table_name: str,
         key: Mapping[str, Any],
         condition_expression: Optional[str] = None,
+        expression_attribute_values: Optional[
+            dict[str, Any]
+        ] = None,
+        expression_attribute_names: Optional[
+            dict[str, str]
+        ] = None,
     ) -> bool:
 
         self._log(
@@ -488,6 +494,18 @@ class DynamoDBService:
             kwargs[
                 "ConditionExpression"
             ] = condition_expression
+
+        if expression_attribute_values:
+            kwargs["ExpressionAttributeValues"] = (
+                self._to_dynamo_value(
+                    expression_attribute_values
+                )
+            )
+
+        if expression_attribute_names:
+            kwargs["ExpressionAttributeNames"] = (
+                expression_attribute_names
+            )
 
         try:
 
@@ -819,6 +837,93 @@ class DynamoDBService:
 
         return written
 
+    # ------------------------------------------------------------------
+    # Transacciones DynamoDB
+    # ------------------------------------------------------------------
+
+    def transact_write_items(
+        self,
+        transact_items: list[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        """
+        Ejecuta operaciones DynamoDB de forma atómica.
+
+        Recibe valores Python normales y los serializa automáticamente
+        al formato de bajo nivel requerido por boto3.
+        """
+
+        if not transact_items:
+            raise ValueError(
+                "transact_items no puede estar vacio"
+            )
+
+        if len(transact_items) > 100:
+            raise ValueError(
+                "Una transaccion no puede superar 100 operaciones"
+            )
+
+        def serialize_attributes(
+            attributes: Mapping[str, Any],
+        ) -> dict[str, Any]:
+            return {
+                key: self._serializer.serialize(
+                    self._to_dynamo_value(value)
+                )
+                for key, value in attributes.items()
+            }
+
+        serialized_items = []
+
+        for operation in transact_items:
+
+            if not isinstance(operation, Mapping) or len(operation) != 1:
+                raise ValueError(
+                    "Cada operacion debe contener una unica accion"
+                )
+
+            action, payload = next(iter(operation.items()))
+
+            if action not in {
+                "Put",
+                "Update",
+                "Delete",
+                "ConditionCheck",
+            }:
+                raise ValueError(
+                    f"Accion transaccional no permitida: {action}"
+                )
+
+            request = dict(payload)
+
+            if "Item" in request:
+                request["Item"] = serialize_attributes(
+                    request["Item"]
+                )
+
+            if "Key" in request:
+                request["Key"] = serialize_attributes(
+                    request["Key"]
+                )
+
+            if "ExpressionAttributeValues" in request:
+                request["ExpressionAttributeValues"] = (
+                    serialize_attributes(
+                        request["ExpressionAttributeValues"]
+                    )
+                )
+
+            serialized_items.append({
+                action: request
+            })
+
+        self._log(
+            "TRANSACT_WRITE",
+            f"operations={len(serialized_items)}",
+        )
+
+        return self._client.transact_write_items(
+            TransactItems=serialized_items
+        )
 
 class _LazyDynamoDB:
     """Compatibilidad legacy sin crear cliente hasta que alguien lo use."""

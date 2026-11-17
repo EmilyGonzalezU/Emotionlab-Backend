@@ -3,7 +3,6 @@
 # ============================================================
 dist/
 build/
-docs/
 node_modules/
 *.exe
 __pycache__/
@@ -18,6 +17,7 @@ htmlcov/
 # Entornos virtuales y paquetes locales
 # ============================================================
 .venv/
+.venv-v2/
 env/
 venv/
 ENV/
@@ -95,11 +95,11 @@ Thumbs.db
 *.bak
 lambda-model-test.zip
 lambda-sync.zip 
-tests/
 aws_test/
 EmotionLabBackend.spec
 lambda-sync/
 lambda-model-test/
+tests/
 # Python caches
 __pycache__/
 *.pyc
@@ -131,5 +131,7 @@ infrastructure/terraform/modules/lambda/*.zip
 lambda_backend_source.zip
 requirements_lambda_only.zip
 ia/*.pkl
-model-image/ia/*.pkl
+
+# Estado local de la prueba funcional de lentes (test_captura.py)
+.emotionlab_captura_state.json
 

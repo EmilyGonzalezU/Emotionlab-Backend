@@ -28,7 +28,7 @@ def sync_aws_sessions():
     return jsonify(
         {
             "importadas": len(result["pending_identification"]),
-            "pendientes_prediccion": len(result["pending_prediction"]),
+            "agregadas": len(result["aggregated"]),
             "errores": len(result["import_errors"]),
             "omitidas_existentes": len(result["skipped_existing"]),
             "total": result["total"],

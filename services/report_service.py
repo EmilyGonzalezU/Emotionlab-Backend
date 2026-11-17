@@ -42,6 +42,7 @@ from reportlab.platypus import (
 )
 
 from core.exceptions import SessionNotFound
+from services.emotion_classification import clasificacion_binaria
 from services.session_parser import SessionParser
 from services.session_service import SessionService
 
@@ -124,11 +125,11 @@ class ReportService:
         El PDF contiene:
 
         1. Detalle completo de la sesión solicitada.
-        2. Resultado de IA de esa sesión.
+        2. Resultado de IA (modelo V2 K-Means) de esa sesión.
         3. Respuestas y eventos de esa sesión.
         4. Resumen histórico del participante:
-           ID de sesión, fecha, hora, estado, bienestar,
-           probabilidad y confianza.
+           ID de sesión, fecha, hora, estado, grupo K-Means,
+           estado del análisis y versión del modelo.
         5. Aviso legal.
         """
 
@@ -380,42 +381,43 @@ class ReportService:
             )
         )
 
-        prediction = (
-            session.get("prediction")
-            or {}
+        processing = session.get("model_processing") or {}
+        if not isinstance(processing, dict):
+            processing = {}
+
+        grupo = self._display(
+            clasificacion_binaria(processing),
+            "No analizado",
         )
 
-        bienestar = self._display(
-            prediction.get("bienestar"),
+        estado_analisis = self._display(
+            processing.get("status"),
             "Pendiente",
         )
 
-        probabilidad = self._percentage(
-            prediction.get("probabilidad")
-        )
-
-        confianza = self._percentage(
-            prediction.get("confianza")
+        version_modelo = self._display(
+            processing.get("model_version"),
+            "No registrada",
         )
 
         ia_table = Table(
             [
                 [
                     Paragraph(
-                        "<b>Bienestar</b>",
+                        "<b>Clasificación</b>",
                         small_style,
                     ),
-                    bienestar,
+                    grupo,
                     Paragraph(
-                        "<b>Probabilidad</b>",
+                        "<b>Análisis</b>",
                         small_style,
                     ),
-                    probabilidad,
+                    estado_analisis,
                     Paragraph(
-                        "<b>Confianza</b>",
+                        "<b>Versión modelo</b>",
                         small_style,
                     ),
-                    confianza,
+                    version_modelo,
                 ]
             ],
             colWidths=[
@@ -834,20 +836,26 @@ class ReportService:
                 "Fecha",
                 "Hora",
                 "Estado",
-                "Bienestar",
-                "Probabilidad",
-                "Confianza",
+                "Clasificación",
+                "Análisis",
+                "Versión modelo",
             ]
         ]
 
         for historical in historical_sessions:
 
-            historical_prediction = (
+            historical_processing = (
                 historical.get(
-                    "prediction"
+                    "model_processing"
                 )
                 or {}
             )
+
+            if not isinstance(
+                historical_processing,
+                dict,
+            ):
+                historical_processing = {}
 
             history.append(
                 [
@@ -879,20 +887,22 @@ class ReportService:
                         "No registrado",
                     ),
                     self._display(
-                        historical_prediction.get(
-                            "bienestar"
+                        clasificacion_binaria(
+                            historical_processing
+                        ),
+                        "No analizado",
+                    ),
+                    self._display(
+                        historical_processing.get(
+                            "status"
                         ),
                         "Pendiente",
                     ),
-                    self._percentage(
-                        historical_prediction.get(
-                            "probabilidad"
-                        )
-                    ),
-                    self._percentage(
-                        historical_prediction.get(
-                            "confianza"
-                        )
+                    self._display(
+                        historical_processing.get(
+                            "model_version"
+                        ),
+                        "No registrada",
                     ),
                 ]
             )
@@ -904,9 +914,9 @@ class ReportService:
                 70,   # Fecha
                 50,   # Hora
                 70,   # Estado
-                65,   # Bienestar
-                75,   # Probabilidad
-                70,   # Confianza
+                65,   # Clasificación
+                75,   # Análisis
+                70,   # Versión modelo
             ],
         )
 
@@ -1085,6 +1095,7 @@ class ReportService:
         *,
         date_from: Optional[str] = None,
         date_to: Optional[str] = None,
+        owner_id: Optional[str] = None,
     ) -> bytes:
         """Genera un Excel general usando campos indexables."""
 
@@ -1092,6 +1103,8 @@ class ReportService:
             date_from=date_from,
             date_to=date_to,
         )
+        if owner_id is not None:
+            sessions = [session for session in sessions if session.get("owner_id") == owner_id]
 
         workbook = Workbook()
         worksheet = workbook.active
@@ -1107,9 +1120,9 @@ class ReportService:
             "edad",
             "genero",
             "difficulty",
-            "bienestar",
-            "probabilidad",
-            "confianza",
+            "clasificacion",
+            "analisis",
+            "model_version",
         ]
 
         worksheet.append(headers)
@@ -1119,10 +1132,16 @@ class ReportService:
 
         for session in sessions:
 
-            prediction = (
-                session.get("prediction")
+            processing = (
+                session.get("model_processing")
                 or {}
             )
+
+            if not isinstance(
+                processing,
+                dict,
+            ):
+                processing = {}
 
             worksheet.append(
                 [
@@ -1136,9 +1155,9 @@ class ReportService:
                     session.get("edad"),
                     session.get("genero"),
                     session.get("difficulty"),
-                    prediction.get("bienestar"),
-                    prediction.get("probabilidad"),
-                    prediction.get("confianza"),
+                    clasificacion_binaria(processing),
+                    processing.get("status"),
+                    processing.get("model_version"),
                 ]
             )
 

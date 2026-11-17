@@ -24,7 +24,7 @@ def build() -> None:
         for name in SOURCE_DIRS:
             shutil.copytree(ROOT / name, stage / name, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--disable-pip-version-check", "--no-compile", "--platform", "manylinux2014_x86_64", "--implementation", "cp", "--python-version", "3.13", "--abi", "cp313", "--only-binary=:all:", "-r", str(ROOT / "requirements-lambda.lock.txt"), "-t", str(stage)],
+            [sys.executable, "-m", "pip", "install", "--disable-pip-version-check", "--no-compile", "--require-hashes", "--platform", "manylinux2014_x86_64", "--implementation", "cp", "--python-version", "3.13", "--abi", "cp313", "--only-binary=:all:", "-r", str(ROOT / "requirements-lambda.lock.txt"), "-t", str(stage)],
             check=True,
         )
         _zip_tree(stage, OUT / "backend.zip")

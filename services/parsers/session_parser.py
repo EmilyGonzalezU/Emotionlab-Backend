@@ -1,12 +1,12 @@
-"""
-Lectura centralizada del JSON real de AWS para una sesión individual.
+"""Lectura centralizada del JSON real de AWS para una sesión individual.
 
-El parser no conoce Firebase ni el servicio de predicción.
-Su responsabilidad es:
-- interpretar el JSON de Unity/AWS
-- normalizar los datos
-- obtener las features necesarias para el modelo
-- indicar qué información falta cuando no puede predecir
+Este parser NO pertenece al modelo de IA: el único modelo vigente es el
+K-Means V2, cuyo contrato de seis variables se extrae con
+``services.parsers.emotion_v2_parser.EmotionV2Parser``.
+
+Su responsabilidad es exclusivamente interpretar el JSON de Unity/AWS y
+normalizar los metadatos de la ficha de la sesión (fechas, duración, edad,
+género, dificultad) para el dashboard y los reportes.
 """
 
 import re
@@ -43,19 +43,6 @@ class SessionParser:
         "session_end",
         "game_completed",
         "game_finished",
-    }
-
-    ESCENAS_EXCLUIDAS = {
-        "waiting_room_inicial",
-        "waiting_room",
-        "retroalimentacion",
-        "retroalimentacion_final",
-    }
-
-    ESCENAS_VALIDAS = {
-        "aula",
-        "oficina",
-        "consulta_virtual",
     }
 
     GENDER_MAPPING = {
@@ -660,214 +647,6 @@ class SessionParser:
         )
 
     # =========================================================
-    # HORA
-    # =========================================================
-
-    def get_hour(self) -> int:
-
-        start_date = self.get_start_date()
-
-        if start_date is None:
-            raise ValueError(
-                "Fecha de inicio inexistente"
-            )
-
-        return start_date.hour
-
-    # =========================================================
-    # DÍA DE LA SEMANA
-    # =========================================================
-
-    def get_weekday(self) -> int:
-
-        start_date = self.get_start_date()
-
-        if start_date is None:
-            raise ValueError(
-                "Fecha de inicio inexistente"
-            )
-
-        return start_date.weekday()
-
-    # =========================================================
-    # INTENTOS
-    # =========================================================
-
-    def get_attempts(self) -> int:
-        return 1
-
-    # =========================================================
-    # ESCENA
-    # =========================================================
-
-    def get_scene(self) -> str:
-
-        for answer in self.answers:
-
-            if not isinstance(
-                answer,
-                Mapping,
-            ):
-                continue
-
-            scene = answer.get("escena")
-
-            if not scene:
-                continue
-
-            scene_str = (
-                str(scene)
-                .strip()
-                .lower()
-            )
-
-            if scene_str in self.ESCENAS_EXCLUIDAS:
-                continue
-
-            if scene_str in self.ESCENAS_VALIDAS:
-                return scene_str
-
-        session_scene = self.session.get(
-            "escena"
-        )
-
-        if session_scene:
-
-            session_scene_str = (
-                str(session_scene)
-                .strip()
-                .lower()
-            )
-
-            if (
-                session_scene_str
-                in self.ESCENAS_VALIDAS
-            ):
-                return session_scene_str
-
-        return "consulta_virtual"
-
-    # =========================================================
-    # FEATURES
-    # =========================================================
-
-    def get_prediction_features(self) -> dict:
-
-        return {
-            "edad": self.get_age(),
-            "hora": self.get_hour(),
-            "dia_semana": self.get_weekday(),
-            "tiempo_total_vr": self.get_duration(),
-            "intentos": self.get_attempts(),
-            "difficulty_level": self.get_difficulty(),
-            "escena": self.get_scene(),
-            "genero": self.get_gender(),
-        }
-
-    # =========================================================
-    # VALIDACIÓN DE PREDICCIÓN
-    # =========================================================
-
-    def get_prediction_missing_fields(
-        self,
-    ) -> list[str]:
-
-        missing = []
-
-        # ---------------------------------------------
-        # Fecha de inicio
-        # ---------------------------------------------
-
-        if self.get_start_date() is None:
-            missing.append("fechaInicio")
-
-        # ---------------------------------------------
-        # Fecha de término / actividad
-        # ---------------------------------------------
-
-        if self.get_end_date() is None:
-            missing.append(
-                "fechaFin/session_completed/actividad"
-            )
-
-        # ---------------------------------------------
-        # Edad
-        # ---------------------------------------------
-
-        try:
-            self.get_age()
-
-        except ValueError:
-            missing.append("edad")
-
-        # ---------------------------------------------
-        # Género
-        # ---------------------------------------------
-
-        try:
-            self.get_gender()
-
-        except ValueError:
-            missing.append("genero")
-
-        # ---------------------------------------------
-        # DIFICULTAD
-        #
-        # AQUÍ ESTÁ LA CORRECCIÓN PRINCIPAL.
-        # ---------------------------------------------
-
-        difficulty = self.get_difficulty()
-
-        if difficulty is None:
-            missing.append(
-                "difficulty_level"
-            )
-
-        # ---------------------------------------------
-        # Escena
-        # ---------------------------------------------
-
-        try:
-            self.get_scene()
-
-        except ValueError:
-            missing.append("escena")
-
-        return missing
-
-    def can_predict(self) -> bool:
-
-        return (
-            len(
-                self.get_prediction_missing_fields()
-            )
-            == 0
-        )
-
-    def get_prediction_status(self) -> dict:
-
-        missing = (
-            self.get_prediction_missing_fields()
-        )
-
-        if missing:
-
-            return {
-                "can_predict": False,
-                "missing_fields": missing,
-                "reason": (
-                    "Faltan datos requeridos "
-                    "para ejecutar la predicción"
-                ),
-            }
-
-        return {
-            "can_predict": True,
-            "missing_fields": [],
-            "reason": None,
-        }
-
-    # =========================================================
     # DASHBOARD
     # =========================================================
 
@@ -916,9 +695,6 @@ class SessionParser:
         return {
             "respuestas": self.get_answers()
         }
-
-    def get_features(self) -> dict:
-        return self.get_prediction_features()
 
     def _optional_age(self):
 

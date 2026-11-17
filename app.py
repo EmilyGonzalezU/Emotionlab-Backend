@@ -60,6 +60,9 @@ def _load_environment():
 _load_environment()
 
 
+from botocore.exceptions import ClientError
+
+from core.aws_error_logging import log_aws_client_error
 from core.exceptions import (
     AuthenticationError,
     AuthorizationError,
@@ -77,6 +80,9 @@ from routes.report_requests import report_requests_bp
 from routes.session_routes import sessions_bp
 from routes.user_routes import users_bp
 from routes.audit_routes import audit_bp
+from routes.tracking_routes import trackings_bp
+from routes.session_code_routes import session_codes_bp
+from routes.capture_routes import captures_bp
 
 
 def _cors_origen_permitido(origin):
@@ -194,6 +200,9 @@ def create_app(services: dict | None = None) -> Flask:
         dashboard_bp,
         reports_bp,
         report_requests_bp,
+        trackings_bp,
+        session_codes_bp,
+        captures_bp,
         audit_bp,
     ):
         app.register_blueprint(blueprint)
@@ -214,6 +223,46 @@ def create_app(services: dict | None = None) -> Flask:
     return app
 
 
+def _build_emotion_v2_engine():
+    """Resuelve el motor de inferencia V2 según ``EMOTION_MODEL_V2_MODE``.
+
+    La selección es determinista y NO existe fallback automático:
+
+    * ``remote`` -> ``EmotionV2Client`` (requiere ``EMOTION_MODEL_V2_API_URL``).
+    * ``local``  -> ``EmotionModelV2Service`` (entorno con scikit-learn 1.6.1).
+
+    Si el modo remoto no tiene URL configurada, se registra el error y se
+    devuelve el cliente igualmente: el análisis V2 quedará en
+    ``processing_error`` y la captura se conservará intacta.
+    """
+
+    mode = os.getenv("EMOTION_MODEL_V2_MODE", "local").strip().lower()
+
+    if mode == "remote":
+        from services.emotion_v2_client import EmotionV2Client
+
+        client = EmotionV2Client()
+
+        if not client.configured:
+            logging.getLogger(__name__).error(
+                "EMOTION_MODEL_V2_MODE=remote pero EMOTION_MODEL_V2_API_URL "
+                "no está configurada: el análisis V2 quedará en "
+                "processing_error y la captura se conservará."
+            )
+
+        return client
+
+    if mode == "local":
+        from services.emotion_model_v2_service import EmotionModelV2Service
+
+        return EmotionModelV2Service()
+
+    raise RuntimeError(
+        "EMOTION_MODEL_V2_MODE debe ser 'remote' o 'local' "
+        f"(se recibió: {mode!r})."
+    )
+
+
 def _build_services() -> dict:
     """Construye y enlaza todos los servicios EmotionLab — ETAPA 2 AWS.
 
@@ -224,12 +273,11 @@ def _build_services() -> dict:
         4. UserService
         5. AuthService
         6. ParticipantService
-        7. PredictionService
-        8. SessionService
-        9. ReportService
-        10. ReportRequestService
-        11. DashboardService
-        12. ImportService
+        7. SessionService
+        8. ReportService
+        9. ReportRequestService
+        10. DashboardService
+        11. ImportService
     """
 
     # ==========================================================
@@ -356,12 +404,8 @@ def _build_services() -> dict:
     )
 
     # ==========================================================
-    # 7-8. PREDICTION + SESSION
+    # 7-8. SESSION
     # ==========================================================
-    from services.prediction_service import PredictionService
-
-    prediction_service = PredictionService()
-
     from services.aws_service import AWSService
 
     aws_service = AWSService()
@@ -373,6 +417,71 @@ def _build_services() -> dict:
         s3_service=s3_service,
         audit_svc=audit_service,
         legacy_data_service=aws_service,
+    )
+
+    # ==========================================================
+    # SEGUIMIENTO SEUDONIMIZADO
+    # ==========================================================
+    from services.tracking_service import TrackingService
+
+    tracking_service = (
+        TrackingService(
+            dynamodb_service=dynamodb_service,
+            session_service=session_service,
+            audit_svc=audit_service,
+        )
+        if dynamodb_service is not None
+        else None
+    )
+
+    # ==========================================================
+    # IDENTIFICACIÓN DE SESIONES DEL LENTE (displayCode)
+    # ==========================================================
+    from services.lens_session_service import LensSessionService
+
+    lens_session_service = (
+        LensSessionService(
+            dynamodb_service=dynamodb_service,
+            audit_svc=audit_service,
+            ssm_service=ssm_service,
+        )
+        if dynamodb_service is not None
+        else None
+    )
+
+    # ==========================================================
+    # INGESTIÓN DE DATOS UNITY (GET /data del API Gateway del lente)
+    # ==========================================================
+    from services.unity_data_service import UnityDataService
+
+    unity_data_service = UnityDataService()
+
+    # ==========================================================
+    # MODELO V2 CONGELADO (K-MEANS) — ÚNICO motor de IA vigente
+    # ==========================================================
+    # El motor se resuelve según `EMOTION_MODEL_V2_MODE` (remote|local).
+    # La instanciación NUNCA falla aunque el artefacto o el entorno no estén
+    # disponibles: en ese caso el análisis V2 queda en `processing_error` sin
+    # afectar la captura.
+    emotion_v2_service = _build_emotion_v2_engine()
+
+    # ==========================================================
+    # CICLO DE CAPTURA (EXPERIENCIA DE EMOTIONLAB)
+    # ==========================================================
+    from services.capture_service import CaptureService
+
+    capture_service = (
+        CaptureService(
+            session_service=session_service,
+            lens_session_service=lens_session_service,
+            audit_svc=audit_service,
+            aws_service=aws_service,
+            s3_service=s3_service,
+            unity_data_service=unity_data_service,
+            emotion_v2_service=emotion_v2_service,
+        )
+        if dynamodb_service is not None
+        else None
     )
 
     # ==========================================================
@@ -411,7 +520,6 @@ def _build_services() -> dict:
 
     import_service = ImportService(
         session_service=session_service,
-        prediction_service=prediction_service,
     )
 
     return {
@@ -438,8 +546,12 @@ def _build_services() -> dict:
 
         # SESIONES / PARTICIPANTES / IA
         "session_service": session_service,
+        "tracking_service": tracking_service,
+        "lens_session_service": lens_session_service,
+        "unity_data_service": unity_data_service,
+        "capture_service": capture_service,
         "participant_service": participant_service,
-        "prediction_service": prediction_service,
+        "emotion_v2_service": emotion_v2_service,
         "import_service": import_service,
         "dashboard_service": dashboard_service,
 
@@ -503,7 +615,15 @@ def _register_error_handlers(app: Flask) -> None:
 
     @app.errorhandler(Exception)
     def unhandled_exception(error):
-        app.logger.error("Error interno no controlado (tipo=%s)", type(error).__name__)
+        if isinstance(error, ClientError):
+            # Diagnóstico seguro: servicio/operación/código/mensaje/request id
+            # y módulo de origen. Conserva el traceback para el log local.
+            log_aws_client_error(app.logger, error)
+        else:
+            app.logger.error(
+                "Error interno no controlado (tipo=%s)",
+                type(error).__name__,
+            )
 
         try:
             cw = app.extensions["services"].get(

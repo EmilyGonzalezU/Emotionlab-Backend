@@ -1,0 +1,15 @@
+# ==========================================
+# EmotionLab - Servicio de inferencia V2 (K-Means congelado)
+# ==========================================
+# Versiones EXACTAS del artefacto congelado. Deben coincidir con
+# ia/modelo_v2/requirements.txt y con las declaradas en
+# ia/modelo_v2/emotionlab_config.json ("dependencias").
+#
+# Este entorno es independiente del backend Flask: la inferencia V2 se
+# ejecuta en una imagen Docker dedicada (ver model-v2-image/Dockerfile).
+pandas==2.2.3
+numpy==2.4.6
+scipy==1.16.3
+scikit-learn==1.6.1
+joblib==1.6.0
+threadpoolctl==3.7.0

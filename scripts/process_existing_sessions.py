@@ -19,7 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from services.aws_service import AWSService  # noqa: E402
-from services.prediction_service import PredictionService  # noqa: E402
+from services.emotion_model_v2_service import EmotionModelV2Service  # noqa: E402
 from services.session_processing_service import SessionProcessingService  # noqa: E402
 from services.session_service import SessionService  # noqa: E402
 from services.storage_repository import DynamoDBRepository, S3Repository  # noqa: E402
@@ -53,7 +53,7 @@ def main() -> int:
     session_service = SessionService(dynamodb_service=_storage_repository())
     processor = SessionProcessingService(
         session_service=session_service,
-        prediction_service=PredictionService(),
+        emotion_v2_service=EmotionModelV2Service(),
     )
     if args.preview:
         summary = processor.preview(records, progress=True)

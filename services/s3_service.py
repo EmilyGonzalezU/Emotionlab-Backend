@@ -102,6 +102,59 @@ class S3Service:
                 return False
             raise
 
+    def list_objects_v2(
+        self,
+        bucket: str,
+        prefix: str = "",
+        *,
+        suffix: Optional[str] = None,
+    ) -> list[dict]:
+        """Lista objetos de un prefijo con paginación completa.
+
+        Recorre TODAS las páginas mediante `ContinuationToken` (no solo la
+        primera) y devuelve, por objeto, su `key`, `last_modified`, `size`
+        y `etag`. `suffix` permite filtrar por terminación (por ejemplo
+        `.json`) sin descargar los objetos.
+
+        S3 no permite filtrar por `LastModified` en el listado: el filtro
+        temporal se aplica en el backend sobre `last_modified`.
+        """
+        self.require_bucket(bucket)
+
+        results: list[dict] = []
+        continuation: Optional[str] = None
+
+        while True:
+            params: dict[str, Any] = {"Bucket": bucket}
+            if prefix:
+                params["Prefix"] = prefix
+            if continuation:
+                params["ContinuationToken"] = continuation
+
+            response = self._client.list_objects_v2(**params)
+
+            for obj in response.get("Contents", []):
+                key = obj.get("Key", "")
+                if suffix and not str(key).lower().endswith(suffix.lower()):
+                    continue
+                results.append(
+                    {
+                        "key": key,
+                        "last_modified": obj.get("LastModified"),
+                        "size": obj.get("Size"),
+                        "etag": obj.get("ETag"),
+                    }
+                )
+
+            if not response.get("IsTruncated"):
+                break
+
+            continuation = response.get("NextContinuationToken")
+            if not continuation:
+                break
+
+        return results
+
     def delete_object(self, bucket: str, key: str) -> None:
         self.require_bucket(bucket)
         self._client.delete_object(Bucket=bucket, Key=key)

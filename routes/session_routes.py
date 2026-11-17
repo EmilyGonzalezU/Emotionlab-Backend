@@ -1,6 +1,6 @@
 """Rutas relacionadas con las sesiones de EmotionLab."""
 
-from flask import Blueprint, current_app, jsonify, request
+from flask import Blueprint, current_app, g, jsonify, request
 
 from core.roles import ROLE_TEACHER
 from middleware.jwt_required import jwt_required
@@ -16,6 +16,22 @@ sessions_bp = Blueprint(
 
 def _get_session_service():
     return current_app.extensions["services"]["session_service"]
+
+
+def _actor_uid() -> str:
+    user = getattr(g, "current_user", None) or {}
+    claims = getattr(g, "current_claims", None) or {}
+    return str(user.get("uid") or user.get("sub") or claims.get("sub") or "")
+
+
+def _owned_by_actor(session: dict) -> bool:
+    actor_uid = _actor_uid()
+    owner_id = str(session.get("owner_id") or "")
+    return bool(actor_uid and owner_id and actor_uid == owner_id)
+
+
+def _owned_sessions(sessions: list[dict]) -> list[dict]:
+    return [session for session in sessions if _owned_by_actor(session)]
 
 
 # ==========================================================
@@ -35,7 +51,7 @@ def list_sessions():
 
         return jsonify([
             _session_summary(item)
-            for item in service.search_by_name(name)
+            for item in _owned_sessions(service.search_by_name(name))
         ]), 200
 
     fecha = (
@@ -53,10 +69,7 @@ def list_sessions():
         )
     )
 
-    return jsonify([
-        _session_summary(session)
-        for session in sessions
-    ]), 200
+    return jsonify([_session_summary(session) for session in _owned_sessions(sessions)]), 200
 
 
 # ==========================================================
@@ -92,6 +105,8 @@ def get_sessions_by_participant(participant_id):
         sessions = _get_session_service().get_sessions_by_participant(
             participant_id
         )
+
+        sessions = _owned_sessions(sessions)
 
         return jsonify([
             _session_summary(session)
@@ -132,7 +147,7 @@ def get_session(session_id):
         session_id
     )
 
-    if not session:
+    if not session or not _owned_by_actor(session):
 
         return jsonify(
             {
@@ -169,8 +184,36 @@ def get_session(session_id):
                 "status"
             ),
 
-            "prediction": session.get(
-                "prediction"
+            "model_processing": session.get(
+                "model_processing"
+            ),
+
+            "ai_status": session.get(
+                "ai_status"
+            ),
+
+            "student_data": session.get(
+                "student_data"
+            ),
+
+            "record_count": session.get(
+                "record_count", 0
+            ),
+
+            "capture_started_at": session.get(
+                "capture_started_at"
+            ),
+
+            "capture_ended_at": session.get(
+                "capture_ended_at"
+            ),
+
+            "capture_finished_at": session.get(
+                "capture_finished_at"
+            ),
+
+            "import_status": session.get(
+                "import_status"
             ),
 
             "fecha": service._get_date(
@@ -198,15 +241,6 @@ def get_session(session_id):
                 False
             ),
 
-            "prediction_error": session.get(
-                "prediction_error"
-            ),
-
-            "prediction_missing_fields": session.get(
-                "prediction_missing_fields",
-                []
-            ),
-
             "raw_data": session.get(
                 "raw_json"
             ),
@@ -223,13 +257,18 @@ def get_session(session_id):
 @roles_required(ROLE_TEACHER)
 def update_session(session_id):
 
+    service = _get_session_service()
+    session = service.get_session_detail(session_id)
+    if not session or not _owned_by_actor(session):
+        return jsonify({"error": "Sesion no encontrada"}), 404
+
     body = request.get_json(
         silent=True
     ) or {}
 
     try:
 
-        _get_session_service().update_session(
+        service.update_session(
             session_id,
             body
         )
@@ -360,6 +399,10 @@ def update_session_name(session_id):
 
         session_service = _get_session_service()
 
+        session = session_service.get_session_detail(session_id)
+        if not session or not _owned_by_actor(session):
+            return jsonify({"error": "Sesion no encontrada"}), 404
+
         session_service.update_name(
             session_id,
             nombre
@@ -402,13 +445,6 @@ def _session_summary(session):
 
     service = _get_session_service()
 
-    prediction = (
-        session.get(
-            "prediction"
-        )
-        or {}
-    )
-
     return {
 
         "session_id": session.get(
@@ -433,6 +469,10 @@ def _session_summary(session):
             "created_at"
         ),
 
+        "capture_started_at": session.get(
+            "capture_started_at"
+        ),
+
         "updated_at": session.get(
             "updated_at"
         ),
@@ -449,16 +489,12 @@ def _session_summary(session):
             "difficulty"
         ),
 
-        "bienestar": prediction.get(
-            "bienestar"
+        "model_processing": session.get(
+            "model_processing"
         ),
 
-        "probabilidad": prediction.get(
-            "probabilidad"
-        ),
-
-        "confianza": prediction.get(
-            "confianza"
+        "ai_status": session.get(
+            "ai_status"
         ),
 
         "nombre": session.get(
@@ -479,14 +515,5 @@ def _session_summary(session):
         "duracion_estimada": session.get(
             "duracion_estimada",
             False
-        ),
-
-        "prediction_error": session.get(
-            "prediction_error"
-        ),
-
-        "prediction_missing_fields": session.get(
-            "prediction_missing_fields",
-            []
         ),
     }

@@ -1,6 +1,6 @@
 """Rutas para la administración de participantes."""
 
-from flask import Blueprint, current_app, jsonify, request
+from flask import Blueprint, current_app, g, jsonify, request
 
 from core.roles import ROLE_ADMIN, ROLE_TEACHER
 from middleware.jwt_required import jwt_required
@@ -17,6 +17,34 @@ participants_bp = Blueprint(
 def _get_service():
     """Obtiene el ParticipantService registrado en Flask."""
     return current_app.extensions["services"]["participant_service"]
+
+def _is_admin():
+    user = getattr(g, "current_user", None) or {}
+    return user.get("rol") == ROLE_ADMIN
+
+def _actor_uid():
+    user = getattr(g, "current_user", None) or {}
+    claims = getattr(g, "current_claims", None) or {}
+    return str(user.get("uid") or user.get("sub") or claims.get("sub") or "")
+
+def _visible(participant):
+    if _is_admin():
+        return True
+    uid = _actor_uid()
+    if not uid or not participant:
+        return False
+    if str(participant.get("created_by") or "") == uid:
+        return True
+    sessions = current_app.extensions["services"]["session_service"].list_sessions()
+    return any(s.get("owner_id") == uid and s.get("participant_id") == participant.get("participant_id") for s in sessions)
+
+def _visible_many(participants):
+    if _is_admin():
+        return participants
+    uid = _actor_uid()
+    sessions = current_app.extensions["services"]["session_service"].list_sessions() if uid else []
+    owned_ids = {s.get("participant_id") for s in sessions if s.get("owner_id") == uid and s.get("participant_id")}
+    return [p for p in participants if p.get("created_by") == uid or p.get("participant_id") in owned_ids]
 
 
 # ==========================================================
@@ -40,9 +68,9 @@ def list_participants():
     service = _get_service()
 
     if name:
-        participants = service.search_by_name(name)
+        participants = _visible_many(service.search_by_name(name))
     else:
-        participants = service.list_participants()
+        participants = _visible_many(service.list_participants())
 
     return jsonify(participants), 200
 
@@ -68,7 +96,7 @@ def search_participants():
     if not name:
         return jsonify([]), 200
 
-    participants = _get_service().search_by_name(name)
+    participants = _visible_many(_get_service().search_by_name(name))
 
     return jsonify(participants), 200
 
@@ -141,7 +169,11 @@ def create_participant():
             nombre=nombre,
             participant_id=participant_id,
             observaciones=observaciones,
+            actor_ctx={"actor_uid": _actor_uid(), "actor_rol": (getattr(g, "current_user", None) or {}).get("rol")},
         )
+
+        if not _visible(participant):
+            return jsonify({"error": "Participante no encontrado"}), 404
 
         return jsonify(participant), 200
 
@@ -189,7 +221,7 @@ def get_participant(participant_id):
         participant_id
     )
 
-    if not participant:
+    if not participant or not _visible(participant):
         return jsonify(
             {
                 "error": "Participante no encontrado"
@@ -221,6 +253,9 @@ def update_participant(participant_id):
                 "error": "observaciones es obligatoria"
             }
         ), 400
+
+    if not _visible(_get_service().get_participant(participant_id)):
+        return jsonify({"error": "Participante no encontrado"}), 404
 
     try:
         _get_service().update_observations(

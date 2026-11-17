@@ -21,7 +21,7 @@ on:
       repository:
         description: ECR repository name created by Terraform
         required: true
-        default: emotionlab-model-portable
+        default: emotionlab-model
         type: string
 
 permissions:
@@ -35,12 +35,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
-      - name: Verify model artifact and run a valid inference
+          python-version: "3.12"
+      - name: Verify V2 artifact and run a valid inference
         run: |
-          python -m pip install -r model-image/requirements.txt
-          python scripts/verify_model_artifacts.py
-          python scripts/test_model_inference.py
+          python -m pip install -r requirements-v2.txt
+          python ia/modelo_v2/emotionlab_inferencia.py ia/modelo_v2 ia/modelo_v2/ejemplo_solicitud.json
       - name: Require an OIDC role when publishing
         if: ${{ inputs.publish_image }}
         env:
@@ -61,6 +60,6 @@ jobs:
           ECR_REPOSITORY: ${{ inputs.repository }}
           IMAGE_TAG: ${{ github.sha }}-${{ github.run_attempt }}
         run: |
-          docker build --platform linux/amd64 -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" ./model-image
+          docker build --platform linux/amd64 -f model-v2-image/Dockerfile -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" .
           docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
           echo "Image URI: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"

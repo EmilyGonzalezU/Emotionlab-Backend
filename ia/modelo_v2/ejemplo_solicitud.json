@@ -1,0 +1,11 @@
+{
+    "id_sesion": "SESION_DEMO_001",
+    "respuestas": {
+        "inicial_nerviosismo": 7,
+        "inicial_sentir_hoy": 6,
+        "facil_nerviosismo_cierre": 4,
+        "facil_sentir_hoy_cierre": 4,
+        "dificil_nerviosismo_cierre": null,
+        "dificil_sentir_hoy_cierre": 7
+    }
+}
