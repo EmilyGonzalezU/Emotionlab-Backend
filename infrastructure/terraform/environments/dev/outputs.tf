@@ -14,8 +14,13 @@ output "model_ecr_repository_url" {
 }
 
 output "jwt_secret_arn" {
-  description = "ARN del secreto JWT vacío que debe poblarse desde Secrets Manager antes de invocar el backend."
+  description = "ARN del secreto JWT_SECRET. Terraform solo crea el contenedor; la versión inicial se crea con scripts/bootstrap_secrets.py antes de invocar el backend."
   value       = aws_secretsmanager_secret.jwt_secret.arn
+}
+
+output "session_code_hmac_secret_arn" {
+  description = "ARN del secreto SESSION_CODE_HMAC_SECRET. Terraform solo crea el contenedor; la versión inicial se crea con scripts/bootstrap_secrets.py antes de invocar el backend."
+  value       = aws_secretsmanager_secret.session_code_hmac.arn
 }
 
 output "frontend_url" {

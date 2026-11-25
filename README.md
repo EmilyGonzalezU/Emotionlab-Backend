@@ -1,118 +1,125 @@
-# EmotionLab
+# EmotionLab Backend
 
-Plataforma para registrar experiencias, analizar datos de bienestar y consultar resultados mediante una aplicación web de escritorio y una API REST.
+API REST en Flask para la captura, análisis y consulta de experiencias EmotionLab. El backend integra autenticación con Amazon Cognito, persistencia en DynamoDB, almacenamiento de sesiones e informes en S3, envío de correo con SES y análisis local con el paquete EmotionLab V8.
 
-Este repositorio contiene la API **EmotionLab Backend**. La interfaz está en el repositorio [EmotionLab Frontend](https://github.com/EmilyGonzalezU/Emotionlab-Frontend). La API usa Flask; la autenticación, los datos y los archivos de producción se integran con Amazon Cognito, DynamoDB y S3. El análisis local usa EmotionLab V2.
+## Funciones actuales
 
-> Esta guía permite preparar y ejecutar el proyecto. Para el modo local completo se necesita acceso a los recursos AWS configurados para el entorno y al endpoint del modelo remoto cuando no se ejecute el análisis local.
+- Autenticación y gestión de usuarios mediante Cognito, con autorización por roles.
+- Gestión de participantes, sesiones, capturas y seguimientos.
+- Importación y consulta de datos provenientes de Unity y de la integración HTTPS con los lentes.
+- Dashboards e informes de sesiones y seguimientos. Los informes PDF completos pasan por una solicitud y aprobación administrativa.
+- Registro de auditoría y límites para solicitudes de códigos de sesión.
+- Inferencia local con los artefactos V8 incluidos en `ia/modelo_v8/`.
+- Infraestructura AWS descrita en Terraform en `infrastructure/terraform/environments/dev/`.
+
+## Arquitectura de inferencia V8
+
+```mermaid
+flowchart LR
+    U[Datos de Unity] --> A[Adaptador V8]
+    A --> V[Validación de respuestas]
+    V --> P[Pipeline y modelo K-Means]
+    P --> R[Resultado y metadatos]
+    R --> S[Servicio de sesiones]
+    S --> D[(DynamoDB)]
+    U --> O[Payload original]
+    O --> D
+```
+
+El paquete valida sus archivos mediante `ia/modelo_v8/manifest_sha256_v1.json`. La inferencia usa las versiones fijadas en `ia/modelo_v8/requirements-inferencia.txt`; el entorno de desarrollo y la imagen de despliegue usan Python 3.13.18. En ejecución local, el modelo V8 se ejecuta dentro del backend. El cliente y contrato V2 permanecen en el código como integración heredada, pero V8 es el flujo local actual.
+
+Los grupos K-Means son etiquetas de agrupamiento, no diagnósticos ni resultados clínicos. El índice exploratorio de tensión se guarda como pendiente de validación y sin valor calculado. El modelo es experimental y no cuenta con validación clínica independiente.
 
 ## Requisitos
 
-- Git.
-- Python 3.12 para ejecutar el backend con EmotionLab V2 local. El script valida `scikit-learn 1.6.1`.
-- Node.js y npm para ejecutar el frontend.
-- Acceso a los recursos AWS del entorno: Cognito, DynamoDB y S3. Algunas funciones también requieren SES, CloudWatch, Lambda o el servicio externo Unity.
-- Acceso al endpoint remoto del modelo V2 si se utiliza `EMOTION_MODEL_V2_MODE=remote`.
-- Para despliegues, AWS CLI v2, Terraform 1.5 o posterior y permisos para los recursos que se crearán.
+- Python 3.13.18 para ejecutar el backend con inferencia V8.
+- AWS configurado para los servicios utilizados por la aplicación. Las credenciales se obtienen mediante la cadena estándar de credenciales de AWS.
+- Docker solo para construir la imagen de backend en contenedor.
+- Terraform 1.5 o posterior para gestionar la infraestructura.
+- DynamoDB Local y Java 17 o posterior si se configura persistencia local.
 
-Docker no es necesario para ejecutar la aplicación localmente. El repositorio no incluye un archivo `docker-compose.yml`.
+## Instalación y ejecución local
 
-## Instalación y configuración
-
-### 1. Descargar los repositorios
-
-```bash
-git clone https://github.com/EmilyGonzalezU/Emotionlab-Backend.git
-git clone https://github.com/EmilyGonzalezU/Emotionlab-Frontend.git
-```
-
-### 2. Configurar el backend
-
-Abre una terminal en `Emotionlab-Backend` y crea un entorno virtual. En Windows PowerShell:
+El proyecto fija Python 3.13.18 para que el runtime coincida con los artefactos V8. En Windows, instala Micromamba y crea el entorno con esa versión exacta:
 
 ```powershell
-py -3.12 -m venv .venv-v2
-.\.venv-v2\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
+winget install --id Mamba.Micromamba --exact
+micromamba create --yes --prefix ./.venv-v8 --channel conda-forge python=3.13.18 pip
+.\.venv-v8\python.exe -m pip install -r requirements.txt
+```
+
+En macOS o Linux, crea el mismo entorno con Micromamba:
+
+```bash
+micromamba create --yes --prefix ./.venv-v8 --channel conda-forge python=3.13.18 pip
+.venv-v8/bin/python -m pip install -r requirements.txt
+```
+
+Crea `.env` a partir de `.env.example` y completa los valores para el entorno que usarás. No pongas credenciales reales en `.env.example` ni las subas a Git. Para conectarse a AWS se requieren las tablas, buckets, pool de Cognito y permisos correspondientes. `DYNAMODB_ENDPOINT_URL` puede apuntar a DynamoDB Local.
+
+```powershell
 Copy-Item .env.example .env
+.\.venv-v8\python.exe -m pip --version
+scripts\run_backend_v8.ps1
 ```
 
-Edita `.env` y completa los valores correspondientes a tu entorno. Como mínimo, revisa la región y los nombres de tablas y buckets, los identificadores de Cognito, los secretos locales y el modo del modelo. Para usar el análisis V2 local, el entorno debe tener `EMOTION_MODEL_V2_MODE=local`. Para usar el servicio remoto, selecciona `remote` y define `EMOTION_MODEL_V2_API_URL`.
+También puedes iniciar con `python app.py`; el arranque directo exige Python 3.13.18 y selecciona inferencia V8 local por defecto. La API queda disponible en `http://127.0.0.1:5000`. El endpoint `GET /health` informa el estado del proceso y qué servicios se cargaron; no comprueba la conectividad o disponibilidad de AWS.
 
-Ejemplo de las variables principales (los valores son ilustrativos):
+La variable `S3_REPORT_PDFS_BUCKET` debe tener el nombre del bucket autorizado para guardar los informes PDF. El ejemplo de desarrollo usa `emotionlab-dev-report-pdfs`; ajústalo si tu infraestructura utiliza otro nombre. El backend rechaza una configuración de bucket de informes distinta a la autorizada en el servicio.
 
-```dotenv
-AWS_REGION=us-east-1
-STORAGE_BACKEND=s3
-COGNITO_USER_POOL_ID=us-east-1_REPLACE_ME
-COGNITO_APP_CLIENT_ID=REPLACE_ME
-DYNAMODB_USERS_TABLE=emotionlab-dev-users
-DYNAMODB_PARTICIPANTS_TABLE=emotionlab-dev-participants
-DYNAMODB_SESSIONS_TABLE=emotionlab-dev-sessions
-S3_DATA_BUCKET=emotionlab-dev-data
-JWT_SECRET=replace-with-a-random-secret-of-at-least-32-characters
-SESSION_CODE_HMAC_SECRET=replace-with-a-random-secret-of-at-least-32-characters
-EMOTION_MODEL_V2_MODE=local
-```
+## Pruebas
 
-Consulta `.env.example` para la lista completa. Genera valores propios para los secretos y no compartas ni subas `.env`, credenciales AWS o archivos `terraform.tfvars`.
-
-### 3. Configurar el frontend
-
-Abre otra terminal en `Emotionlab-Frontend`:
+Las pruebas automatizadas están en `tests/` y usan dobles locales para probar lógica, rutas y autorización sin llamar a servicios AWS desplegados:
 
 ```powershell
-npm ci
-Copy-Item .env.example .env.local
+.\.venv-v8\Scripts\python.exe -m pytest -q
 ```
 
-En desarrollo, la API usa por defecto `http://127.0.0.1:5000`. Si tu backend está en otra dirección, establece `VITE_API_URL` en `.env.local`. Esta variable se incorpora al cliente; no pongas secretos en variables `VITE_*`.
+GitHub Actions ejecuta la suite en cada push y pull request. El workflow manual `Validate EmotionLab V8 package` verifica específicamente la inferencia V8.
 
-## Ejecución, acceso y detención
+## AWS y Terraform
 
-### Iniciar la API
+La configuración actual de Terraform está en `infrastructure/terraform/environments/dev/` y los módulos reutilizables en `infrastructure/terraform/modules/`. Define variables locales en `terraform.tfvars` a partir de `terraform.tfvars.example`; ese archivo local está excluido de Git. El backend Terraform está configurado en `backend.tf` y requiere que el bucket remoto de estado exista y sea accesible antes de inicializar Terraform.
 
-Desde `Emotionlab-Backend`, con el entorno virtual activado:
+La infraestructura contempla API Gateway, Lambdas, DynamoDB, S3, Cognito, Secrets Manager, CloudWatch y un repositorio ECR para el modelo, además de recursos opcionales de SES y hosting frontend. Revisa las variables y salidas del entorno antes de aplicar cambios: Terraform puede crear o modificar recursos facturables en AWS.
 
-```powershell
-.\scripts\run_backend_v2.ps1
-```
-
-El script inicia Flask en modo local y comprueba que se esté usando Python 3.12 y `scikit-learn 1.6.1`. Si el script no puede ejecutarse por la política de PowerShell, permite la ejecución para la sesión actual con `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` y vuelve a iniciarlo.
-
-Comprueba la API en [http://127.0.0.1:5000/health](http://127.0.0.1:5000/health). Para detenerla, presiona `Ctrl+C` en la terminal donde está ejecutándose.
-
-### Iniciar el frontend
-
-Desde `Emotionlab-Frontend`:
+La imagen contenedora del backend V8 está definida en `infrastructure/deploy/backend_v8/Dockerfile`. Para construirla desde la raíz del repositorio:
 
 ```bash
-npm run dev
+docker build --platform linux/amd64 \
+  -f infrastructure/deploy/backend_v8/Dockerfile \
+  -t emotionlab-backend:v8 .
 ```
 
-Abre la dirección local que muestra Vite en la terminal (normalmente [http://localhost:5173](http://localhost:5173)). Para detenerlo, presiona `Ctrl+C`. También se puede compilar la versión de producción con `npm run build`; ese comando requiere que `VITE_API_URL` tenga la URL HTTPS real de la API.
+El archivo `lambda_handler.py` expone el adaptador de la aplicación Flask para AWS Lambda. `lambda_sync/lambda_function.py` contiene la función de sincronización. Los paquetes ZIP en `infrastructure/terraform/packages/` son artefactos generados para despliegue; no son necesarios para ejecutar la API localmente.
 
-Los endpoints principales de la API incluyen `/health`, `/auth/*`, `/users`, `/participants`, `/sessions`, `/captures/*`, `/trackings/*`, `/dashboard/*` y `/reports/*`. Las rutas protegidas requieren un token válido de Cognito y permisos de usuario apropiados. No se incluyen usuarios de prueba ni contraseñas en el repositorio; usa cuentas provistas para tu entorno.
+## Configuración
 
-## Solución de problemas
+Consulta `.env.example` para la lista de variables. Entre las principales:
 
-- **El script V2 rechaza el entorno:** confirma Python 3.12 y `scikit-learn 1.6.1`. Vuelve a crear `.venv-v2` con Python 3.12 e instala `requirements.txt`.
-- **La API no inicia o `/health` informa errores de servicios:** revisa `.env`, la región AWS, credenciales activas y permisos de Cognito, DynamoDB y S3. Confirma que los recursos indicados en `.env` existan.
-- **No se puede conectar con AWS:** configura credenciales mediante el perfil AWS de tu organización (`aws configure` o `AWS_PROFILE`) y verifica el acceso con AWS CLI. No guardes claves en este README ni en Git.
-- **El navegador bloquea llamadas por CORS:** configura el origen local del frontend en `CORS_ALLOWED_ORIGINS` para el backend y reinicia la API.
-- **El análisis remoto falla:** revisa `EMOTION_MODEL_V2_MODE`, `EMOTION_MODEL_V2_API_URL` y la conectividad HTTPS al endpoint. En modo local, utiliza el script V2 y sus versiones requeridas.
-- **El frontend muestra error de conexión:** confirma que Flask esté escuchando en el puerto 5000 y que `VITE_API_URL` coincida con la dirección de la API; reinicia Vite después de cambiar variables.
-- **Unity no importa datos:** Unity es un servicio externo. Revisa `AWS_UNITY_DATA_URL`, la disponibilidad del endpoint y el formato de los datos recibidos.
+| Variable | Uso |
+| --- | --- |
+| `AWS_REGION` | Región de AWS. |
+| `COGNITO_USER_POOL_ID`, `COGNITO_APP_CLIENT_ID` | Autenticación Cognito. |
+| `DYNAMODB_*_TABLE` | Nombres de tablas usadas por los servicios. |
+| `S3_DATA_BUCKET`, `S3_SESSIONS_RAW_BUCKET`, `S3_REPORT_PDFS_BUCKET` | Buckets de datos, sesiones originales e informes PDF. |
+| `JWT_SECRET`, `SESSION_CODE_HMAC_SECRET`, `FERNET_KEY` | Claves de aplicación; configura valores aleatorios y privados según el entorno. |
+| `EMOTION_MODEL_V8_MODE` | Modo de inferencia V8; local es el predeterminado al iniciar `app.py`. |
+| `LENS_API_BASE_URL` | URL HTTPS de la integración externa con los lentes. |
+| `FRONTEND_URL`, `CORS_ALLOWED_ORIGINS` | Enlaces de correo y orígenes permitidos para el frontend. |
 
-Encontrarás detalles adicionales en los archivos de configuración y despliegue del directorio `infrastructure/terraform` y en los ejemplos `.env.example` de cada proyecto.
-## Despliegue
+## Estructura del repositorio
 
-La infraestructura AWS se administra con Terraform en `infrastructure/terraform/environments/dev`. El despliegue necesita una cuenta AWS con permisos para crear o utilizar roles IAM, API Gateway, Lambda, Cognito, DynamoDB, S3, ECR y CloudWatch, además de configurar el modelo V2 y los servicios externos que correspondan.
-
-Antes de desplegar, revisa [docs/PORTABILITY.md](docs/PORTABILITY.md) y [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md), prepara los paquetes Lambda y completa las variables del entorno. Los comandos de Terraform pueden crear recursos con costo. El frontend de producción requiere la URL HTTPS real de API Gateway:
-
-```powershell
-npm run configure:api -- ..\Emotionlab-Backend\infrastructure\terraform\environments\dev
-npm run build
+```text
+app.py                              Aplicación Flask y registro de servicios/rutas
+routes/                             Endpoints HTTP
+services/                           Lógica de negocio e integraciones
+core/                               Seguridad, roles y componentes compartidos
+integrations/lens_api/              Integración Lambda del flujo de lentes
+ia/modelo_v8/                       Artefactos y contrato de inferencia V8
+lambda_handler.py                   Entrada Lambda del backend
+lambda_sync/                         Función de sincronización
+infrastructure/terraform/           Infraestructura AWS
+infrastructure/deploy/backend_v8/   Imagen Docker del backend
+tests/                              Pruebas automatizadas
 ```
-

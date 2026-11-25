@@ -84,6 +84,19 @@ resource "aws_apigatewayv2_route" "backend" {
   target    = "integrations/${aws_apigatewayv2_integration.backend.id}"
 }
 
+# ============================================================
+# RUTA DE IDENTIFICACIÓN DE SESIÓN DEL LENTE
+# ============================================================
+# El especialista envía el displayCode de 6 dígitos; el backend lo
+# valida contra el API Gateway HTTPS externo del lente. La ruta se declara
+# de forma explícita para poder aplicarle throttling.
+
+resource "aws_apigatewayv2_route" "session_code_resolve" {
+  api_id    = aws_apigatewayv2_api.this.id
+  route_key = "POST /sessions/resolve-display-code"
+  target    = "integrations/${aws_apigatewayv2_integration.backend.id}"
+}
+
 resource "aws_lambda_permission" "backend" {
   statement_id  = "AllowExecutionFromApiGatewayBackend"
   action        = "lambda:InvokeFunction"
@@ -96,12 +109,12 @@ resource "aws_lambda_permission" "backend" {
 # ============================================================
 # MODEL
 # ============================================================
-# El modelo es opcional porque actualmente no tenemos la
-# imagen Docker disponible en ECR.
+# Servicio de inferencia V2 (K-Means congelado). Es opcional porque la
+# imagen Docker se publica en ECR por separado.
 #
 # Cuando model_enabled = false:
-# - No se crea la integración /predict
-# - No se crea la ruta POST /predict
+# - No se crea la integración /predict-v2
+# - No se crea la ruta POST /predict-v2
 # - No se crea el permiso para el Lambda del modelo
 #
 # Cuando model_enabled = true:
@@ -128,7 +141,7 @@ resource "aws_apigatewayv2_route" "model" {
   count = var.model_enabled ? 1 : 0
 
   api_id    = aws_apigatewayv2_api.this.id
-  route_key = "POST /predict"
+  route_key = "POST /predict-v2"
   target    = "integrations/${aws_apigatewayv2_integration.model[0].id}"
 }
 
@@ -184,6 +197,14 @@ resource "aws_apigatewayv2_stage" "default" {
   api_id      = aws_apigatewayv2_api.this.id
   name        = var.stage_name
   auto_deploy = true
+
+  # Validación del displayCode: capa global de protección.
+  # El limitador por IP de origen vive en el backend (HTTP 429).
+  route_settings {
+    route_key              = "POST /sessions/resolve-display-code"
+    throttling_burst_limit = 5
+    throttling_rate_limit  = 2
+  }
 }
 
 # ============================================================

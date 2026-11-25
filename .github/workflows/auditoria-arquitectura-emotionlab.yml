@@ -95,7 +95,7 @@ jobs:
 
           run_aws ecr-repositories ecr describe-repositories --output json
           run_aws ecr-model-images ecr describe-images \
-            --repository-name emotionlab-model-portable --output json
+            --repository-name emotionlab-model --output json
 
           run_aws dynamodb-tables dynamodb list-tables --output json
           run_aws s3-buckets s3api list-buckets --output json

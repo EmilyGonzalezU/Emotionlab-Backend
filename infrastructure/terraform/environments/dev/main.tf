@@ -46,15 +46,34 @@ resource "aws_iam_role_policy" "lambda_app" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = concat([
-      { Effect = "Allow", Action = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:Query", "dynamodb:Scan", "dynamodb:BatchGetItem", "dynamodb:BatchWriteItem", "dynamodb:DescribeTable"], Resource = concat([for arn in [module.dynamodb_users.table_arn, module.dynamodb_participants.table_arn, module.dynamodb_sessions.table_arn, module.dynamodb_audit_logs.table_arn, module.dynamodb_report_requests.table_arn] : "${arn}/*"], [module.dynamodb_users.table_arn, module.dynamodb_participants.table_arn, module.dynamodb_sessions.table_arn, module.dynamodb_audit_logs.table_arn, module.dynamodb_report_requests.table_arn]) },
+      { Effect = "Allow", Action = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:Query", "dynamodb:Scan", "dynamodb:BatchGetItem", "dynamodb:BatchWriteItem", "dynamodb:DescribeTable"], Resource = concat([for arn in [module.dynamodb_users.table_arn, module.dynamodb_participants.table_arn, module.dynamodb_sessions.table_arn, module.dynamodb_audit_logs.table_arn, module.dynamodb_report_requests.table_arn, module.dynamodb_trackings.table_arn, module.dynamodb_session_code_rate_limits.table_arn] : "${arn}/*"], [module.dynamodb_users.table_arn, module.dynamodb_participants.table_arn, module.dynamodb_sessions.table_arn, module.dynamodb_audit_logs.table_arn, module.dynamodb_report_requests.table_arn, module.dynamodb_trackings.table_arn, module.dynamodb_session_code_rate_limits.table_arn]) },
+      {
+        Effect = "Allow"
+        Action = ["dynamodb:TransactWriteItems"]
+        Resource = [
+          module.dynamodb_trackings.table_arn,
+          module.dynamodb_sessions.table_arn,
+          module.dynamodb_session_code_rate_limits.table_arn
+        ]
+      },
       { Effect = "Allow", Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"], Resource = ["${module.s3_data.bucket_arn}/*", "${module.s3_report_pdfs.bucket_arn}/*", "${module.s3_sessions_raw.bucket_arn}/*"] },
       { Effect = "Allow", Action = ["s3:ListBucket"], Resource = [module.s3_data.bucket_arn, module.s3_report_pdfs.bucket_arn, module.s3_sessions_raw.bucket_arn] },
       { Effect = "Allow", Action = ["cognito-idp:AdminCreateUser", "cognito-idp:AdminGetUser", "cognito-idp:AdminUpdateUserAttributes", "cognito-idp:AdminSetUserPassword", "cognito-idp:AdminDisableUser", "cognito-idp:AdminEnableUser", "cognito-idp:AdminDeleteUser", "cognito-idp:AdminInitiateAuth", "cognito-idp:AdminRespondToAuthChallenge", "cognito-idp:ListUsers"], Resource = [module.cognito.user_pool_arn] },
-      { Effect = "Allow", Action = ["ses:SendEmail", "ses:SendRawEmail"], Resource = var.ses_source_arn != "" ? var.ses_source_arn : "arn:aws:ses:${var.aws_region}:${local.account_id}:identity/${var.email_sender_address}" },
-      { Effect = "Allow", Action = ["ssm:GetParameter", "ssm:GetParameters"], Resource = "arn:aws:ssm:${var.aws_region}:${local.account_id}:parameter/${local.project}/${local.env}/*" },
-      { Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = aws_secretsmanager_secret.jwt_secret.arn },
+      {
+        Effect = "Allow"
+        Action = ["secretsmanager:GetSecretValue"]
+        Resource = [
+          aws_secretsmanager_secret.jwt_secret.arn,
+          aws_secretsmanager_secret.session_code_hmac.arn
+        ]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["ecr:GetDownloadUrlForLayer", "ecr:BatchGetImage", "ecr:BatchCheckLayerAvailability"]
+        Resource = [module.ecr_model.repository_arn]
+      },
       { Effect = "Allow", Action = ["logs:CreateLogStream", "logs:PutLogEvents"], Resource = "arn:aws:logs:${var.aws_region}:${local.account_id}:log-group:/aws/lambda/${local.name_prefix}-*:*" },
-    ], var.s3_kms_key_arn != "" ? [{ Effect = "Allow", Action = ["kms:Decrypt", "kms:GenerateDataKey", "kms:Encrypt"], Resource = var.s3_kms_key_arn }] : [])
+    ], var.email_sender_address != "" ? [{ Effect = "Allow", Action = ["ses:SendEmail"], Resource = var.ses_source_arn != "" ? var.ses_source_arn : "arn:aws:ses:${var.aws_region}:${local.account_id}:identity/${var.email_sender_address}" }] : [], var.s3_kms_key_arn != "" ? [{ Effect = "Allow", Action = ["kms:Decrypt", "kms:GenerateDataKey", "kms:Encrypt"], Resource = var.s3_kms_key_arn }] : [])
   })
 }
 
@@ -63,6 +82,17 @@ resource "aws_secretsmanager_secret" "jwt_secret" {
   recovery_window_in_days = 30
   tags                    = { Project = local.project, Environment = local.env }
 }
+
+resource "aws_secretsmanager_secret" "session_code_hmac" {
+  name                    = "${local.project}/${local.env}/SESSION_CODE_HMAC_SECRET"
+  recovery_window_in_days = 30
+
+  tags = {
+    Project     = local.project
+    Environment = local.env
+  }
+}
+
 module "ecr_model" {
   source = "../../modules/ecr"
 
@@ -143,7 +173,7 @@ module "dynamodb_users" {
     {
       name = "created_at"
       type = "S"
-    }
+    },
   ]
 
   global_secondary_indexes = [
@@ -162,7 +192,7 @@ module "dynamodb_users" {
       non_key_attributes = ["uid", "nombre", "email", "activo"]
       read_capacity      = null
       write_capacity     = null
-    }
+    },
   ]
 
   tags = {
@@ -255,6 +285,73 @@ module "dynamodb_participants" {
 }
 
 # ============================================================
+# DYNAMODB TRACKINGS
+# ============================================================
+
+module "dynamodb_trackings" {
+  source = "../../modules/dynamodb_table"
+
+  table_name                     = "${local.name_prefix}-trackings"
+  partition_key_name             = "tracking_code"
+  partition_key_type             = "S"
+  sort_key_name                  = null
+  sort_key_type                  = null
+  billing_mode                   = "PAY_PER_REQUEST"
+  point_in_time_recovery_enabled = var.dynamodb_pitr_enabled
+
+  attributes = [
+    {
+      name = "tracking_id"
+      type = "S"
+    }
+  ]
+
+  global_secondary_indexes = [
+    {
+      name            = "gsi-trackings-id"
+      hash_key        = "tracking_id"
+      projection_type = "ALL"
+      read_capacity   = null
+      write_capacity  = null
+    }
+  ]
+
+  tags = {
+    Project = local.project
+    Env     = local.env
+  }
+}
+
+# ============================================================
+# DYNAMODB SESSION CODE RATE LIMITS
+# ============================================================
+# Limitador de intentos fallidos al validar el displayCode.
+# Es propiedad de EmotionLab y no interviene en la creación normal
+# de sesiones que realiza el lente.
+
+module "dynamodb_session_code_rate_limits" {
+  source = "../../modules/dynamodb_table"
+
+  table_name                     = "${local.name_prefix}-session-code-rate-limits"
+  partition_key_name             = "rate_key"
+  partition_key_type             = "S"
+  sort_key_name                  = null
+  sort_key_type                  = null
+  billing_mode                   = "PAY_PER_REQUEST"
+  point_in_time_recovery_enabled = var.dynamodb_pitr_enabled
+
+  ttl_attribute_name = "expires_at"
+
+  attributes               = []
+  global_secondary_indexes = []
+
+  tags = {
+    Project = local.project
+    Env     = local.env
+  }
+}
+
+# ============================================================
 # DYNAMODB SESSIONS
 # ============================================================
 
@@ -289,6 +386,14 @@ module "dynamodb_sessions" {
     {
       name = "created_at"
       type = "S"
+    },
+    {
+      name = "tracking_id"
+      type = "S"
+    },
+    {
+      name = "lens_session_id"
+      type = "S"
     }
   ]
 
@@ -303,7 +408,7 @@ module "dynamodb_sessions" {
         "session_id",
         "participant_id",
         "nombre",
-        "pred_bienestar",
+        "model_processing",
         "fecha",
         "hora",
         "edad",
@@ -343,9 +448,46 @@ module "dynamodb_sessions" {
 
       non_key_attributes = [
         "status",
-        "pred_bienestar",
+        "model_processing",
         "nombre",
         "participant_id"
+      ]
+
+      read_capacity  = null
+      write_capacity = null
+    },
+    {
+      name            = "gsi-sessions-tracking"
+      hash_key        = "tracking_id"
+      range_key       = "sk"
+      projection_type = "INCLUDE"
+
+      non_key_attributes = [
+        "owner_id",
+        "session_id",
+        "status",
+        "fecha",
+        "hora",
+        "model_processing",
+        "difficulty"
+      ]
+
+      read_capacity  = null
+      write_capacity = null
+    },
+    # Identidad ORIGINAL de la captura del lente (`sessionId` de la Lambda
+    # `createSession`). Permite centralizar registros posteriores de la misma
+    # experiencia sin usar el PIN como clave permanente.
+    {
+      name            = "gsi-sessions-lens-session"
+      hash_key        = "lens_session_id"
+      projection_type = "INCLUDE"
+
+      non_key_attributes = [
+        "participant_id",
+        "sk",
+        "session_id",
+        "status"
       ]
 
       read_capacity  = null
@@ -534,7 +676,7 @@ module "dynamodb_report_requests" {
 module "s3_report_pdfs" {
   source = "../../modules/s3_private_bucket"
 
-  bucket_name        = var.report_pdfs_bucket_name != "" ? var.report_pdfs_bucket_name : "${local.name_prefix}-report-pdfs-${local.account_id}"
+  bucket_name        = var.report_pdfs_bucket_name
   env                = local.env
   project            = local.project
   versioning_enabled = var.s3_versioning_enabled
@@ -581,6 +723,8 @@ module "parameter_store" {
     "/${local.project}/${local.env}/dynamodb/participants-table" = module.dynamodb_participants.table_name
 
     "/${local.project}/${local.env}/dynamodb/sessions-table" = module.dynamodb_sessions.table_name
+
+    "/${local.project}/${local.env}/dynamodb/trackings-table" = module.dynamodb_trackings.table_name
 
     "/${local.project}/${local.env}/dynamodb/audit-table" = module.dynamodb_audit_logs.table_name
 
@@ -640,12 +784,16 @@ module "lambda_backend" {
   memory_size = 1024
 
   environment_variables = {
-    JWT_SECRET_ID         = aws_secretsmanager_secret.jwt_secret.arn
-    COGNITO_APP_CLIENT_ID = module.cognito.app_client_id
+    JWT_SECRET_ID               = aws_secretsmanager_secret.jwt_secret.arn
+    SESSION_CODE_HMAC_SECRET_ID = aws_secretsmanager_secret.session_code_hmac.arn
+    COGNITO_APP_CLIENT_ID       = module.cognito.app_client_id
 
-    # La URL de /predict queda determinada por el API Gateway
-    # de EmotionLab.
-    PREDICTION_API_URL = "${module.api_gateway.api_endpoint}/predict"
+    # Motor único de IA: V2 (K-Means congelado). La inferencia NO se ejecuta
+    # en el backend Flask: se delega en el servicio remoto (imagen Docker con
+    # scikit-learn 1.6.1). Si la URL no está disponible, el análisis queda en
+    # `processing_error` y la captura se conserva (sin fallback local).
+    EMOTION_MODEL_V2_MODE    = "remote"
+    EMOTION_MODEL_V2_API_URL = "${module.api_gateway.api_endpoint}/predict-v2"
 
     STORAGE_BACKEND                = "dynamodb"
     COGNITO_USER_POOL_ID           = module.cognito.user_pool_id
@@ -653,17 +801,26 @@ module "lambda_backend" {
     DYNAMODB_USERS_TABLE           = module.dynamodb_users.table_name
     DYNAMODB_PARTICIPANTS_TABLE    = module.dynamodb_participants.table_name
     DYNAMODB_SESSIONS_TABLE        = module.dynamodb_sessions.table_name
+    DYNAMODB_TRACKINGS_TABLE       = module.dynamodb_trackings.table_name
     DYNAMODB_AUDIT_LOGS_TABLE      = module.dynamodb_audit_logs.table_name
     DYNAMODB_REPORT_REQUESTS_TABLE = module.dynamodb_report_requests.table_name
-    S3_DATA_BUCKET                 = module.s3_data.bucket_name
-    S3_REPORT_PDFS_BUCKET          = module.s3_report_pdfs.bucket_name
-    S3_SESSIONS_RAW_BUCKET         = module.s3_sessions_raw.bucket_name
-    SES_SENDER_ADDRESS             = var.email_sender_address
-    SES_SENDER_NAME                = var.email_sender_name
-    CLOUDWATCH_ENABLED             = "false"
-    CORS_ALLOWED_ORIGINS           = var.cors_allowed_origins
-    SSM_PREFIX                     = "/${local.project}/${local.env}/"
-    ENV                            = local.env
+
+    # Limitador de intentos fallidos del displayCode (propiedad de EmotionLab).
+    DYNAMODB_SESSION_CODE_RATE_LIMITS_TABLE = module.dynamodb_session_code_rate_limits.table_name
+
+    # La integración del lente va por HTTPS; no requiere DynamoDB externo.
+    LENS_API_BASE_URL = var.lens_api_base_url
+
+    S3_DATA_BUCKET         = module.s3_data.bucket_name
+    S3_REPORT_PDFS_BUCKET  = module.s3_report_pdfs.bucket_name
+    S3_SESSIONS_RAW_BUCKET = module.s3_sessions_raw.bucket_name
+    SES_SENDER_ADDRESS     = var.email_sender_address
+    SES_SENDER_NAME        = var.email_sender_name
+    FRONTEND_URL           = var.frontend_url
+    CLOUDWATCH_ENABLED     = "false"
+    CORS_ALLOWED_ORIGINS   = var.cors_allowed_origins
+    SSM_PREFIX             = "/${local.project}/${local.env}/"
+    ENV                    = local.env
   }
 }
 
@@ -706,8 +863,6 @@ module "lambda_sync" {
   memory_size = 512
 
   environment_variables = {
-    PREDICTION_API_URL = "${module.api_gateway.api_endpoint}/predict"
-
     # API EXTERNA DEL PROYECTO UNITY.
     # Terraform NO crea ni administra esta API.
     AWS_UNITY_DATA_URL = var.unity_data_url

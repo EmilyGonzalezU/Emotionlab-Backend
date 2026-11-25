@@ -41,9 +41,14 @@ variable "data_bucket_name" {
 }
 
 variable "report_pdfs_bucket_name" {
-  description = "Nombre opcional del bucket S3 para PDFs. Si se deja vacío, se genera uno único por cuenta."
+  description = "Nombre explícito del bucket S3 para PDFs de informes."
   type        = string
-  default     = ""
+  default     = "emotionlab-dev-report-pdfs"
+
+  validation {
+    condition     = trimspace(var.report_pdfs_bucket_name) != ""
+    error_message = "report_pdfs_bucket_name debe definir explícitamente el bucket de informes PDF."
+  }
 }
 
 variable "sessions_raw_bucket_name" {
@@ -66,6 +71,43 @@ variable "jwt_secret" {
 
 variable "unity_data_url" {
   description = "URL externa que utiliza Sync para obtener los datos provenientes de los proyectos Unity."
+  type        = string
+  default     = ""
+}
+
+variable "lens_api_base_url" {
+  description = "Base HTTPS del API Gateway externo del lente (rutas /session/confirm y /data)."
+  type        = string
+  default     = "https://cntbcwfel0.execute-api.us-east-1.amazonaws.com/prod"
+
+  validation {
+    condition     = can(regex("^https://", var.lens_api_base_url))
+    error_message = "lens_api_base_url debe ser una URL HTTPS."
+  }
+}
+
+variable "frontend_url" {
+  description = "URL del frontend enlazada desde correos; por defecto apunta al desarrollo local."
+  type        = string
+  default     = "http://localhost:5173"
+}
+
+# Variables legacy aceptadas para no invalidar tfvars locales antiguos.
+# El backend actual no lee estas tablas y no reciben permisos IAM.
+variable "lens_sessions_table_name" {
+  description = "LEGACY: tabla DynamoDB de sesiones del lente; sin uso en el flujo HTTPS actual."
+  type        = string
+  default     = "emotionlab-sessions"
+}
+
+variable "lens_display_codes_table_name" {
+  description = "LEGACY: tabla DynamoDB de códigos del lente; sin uso en el flujo HTTPS actual."
+  type        = string
+  default     = "emotionlab-session-display-codes"
+}
+
+variable "lens_tables_account_id" {
+  description = "LEGACY: cuenta de tablas DynamoDB del lente; sin uso en el flujo HTTPS actual."
   type        = string
   default     = ""
 }

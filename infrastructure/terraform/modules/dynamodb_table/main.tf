@@ -86,6 +86,12 @@ variable "point_in_time_recovery_enabled" {
   default     = true
 }
 
+variable "ttl_attribute_name" {
+  description = "Atributo numérico Unix utilizado para expiración TTL"
+  type        = string
+  default     = null
+}
+
 locals {
 
   # ============================================================
@@ -250,7 +256,7 @@ locals {
   # Esto evita errores como:
   #
   #   nombre
-  #   pred_bienestar
+  #   model_processing
   #   hora
   #   edad
   #
@@ -443,7 +449,7 @@ resource "aws_dynamodb_table" "table" {
       # Aquí SÍ pueden aparecer atributos normales como:
       #
       # nombre
-      # pred_bienestar
+      # model_processing
       # fecha
       # hora
       # edad
@@ -487,6 +493,15 @@ resource "aws_dynamodb_table" "table" {
 
   point_in_time_recovery {
     enabled = var.point_in_time_recovery_enabled
+  }
+
+  dynamic "ttl" {
+    for_each = var.ttl_attribute_name != null ? [var.ttl_attribute_name] : []
+
+    content {
+      attribute_name = ttl.value
+      enabled        = true
+    }
   }
 
   # ============================================================

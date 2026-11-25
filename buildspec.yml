@@ -1,62 +1,12 @@
-# ============================================================
-# AWS CodeBuild - Construccion y publicacion de la imagen del modelo V2
-# ============================================================
-#
-# Contexto de construccion: RAIZ del repositorio EmotionLab-Backend
-# (el Dockerfile copia ia/modelo_v2, services/ y model-v2-image/).
-#
-# El proyecto CodeBuild debe configurarse con:
-#   - Source:             este repositorio (raiz)
-#   - Buildspec:          buildspec.yml
-#   - Imagen gestionada:  aws/codebuild/standard:7.0
-#   - Privileged mode:    NO requerido (docker build/push funciona sin el)
-#
-# Variables de entorno del proyecto CodeBuild (se pueden sobreescribir):
-#   AWS_DEFAULT_REGION  us-east-1
-#   ECR_REPOSITORY      emotionlab-model
-#   IMAGE_TAG           v2-20261116   (etiqueta versionada; el repositorio
-#                                      ECR es IMMUTABLE, no reutilizar tags)
-#
-# El rol de servicio de CodeBuild necesita unicamente:
-#   ecr:GetAuthorizationToken                                   (Resource: *)
-#   ecr:BatchCheckLayerAvailability, ecr:CompleteLayerUpload,
-#   ecr:InitiateLayerUpload, ecr:UploadLayerPart, ecr:PutImage  (repo ECR)
-#   ecr:DescribeImages, ecr:BatchGetImage                       (verificacion)
-#   logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents
-#
 version: 0.2
 
-env:
-  variables:
-    ECR_REPOSITORY: emotionlab-model
-    IMAGE_TAG: v2-20261116
-  exported-variables:
-    - IMAGE_URI
-
 phases:
-  pre_build:
+  install:
+    runtime-versions:
+      python: 3.13
     commands:
-      - echo "CodeBuild EmotionLab V2 -> cuenta/region:"
-      - ACCOUNT_ID="${AWS_ACCOUNT_ID:-$(aws sts get-caller-identity --query Account --output text)}"
-      - ECR_REGISTRY="$ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com"
-      - echo "Registry: $ECR_REGISTRY  Repositorio: $ECR_REPOSITORY  Tag: $IMAGE_TAG"
-      - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+      - python -m pip install --upgrade pip
+      - python -m pip install -r requirements.txt
   build:
     commands:
-      - echo "Construyendo imagen linux/amd64 desde la raiz del repositorio..."
-      - docker build --platform linux/amd64 -f model-v2-image/Dockerfile -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" .
-  post_build:
-    commands:
-      - echo "Publicando imagen inmutable..."
-      - docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-      - IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-      - echo "Imagen publicada: $IMAGE_URI"
-      - echo "Verificando la imagen en ECR..."
-      - |
-        aws ecr describe-images \
-          --repository-name "$ECR_REPOSITORY" \
-          --image-ids imageTag="$IMAGE_TAG" \
-          --region "$AWS_DEFAULT_REGION" \
-          --query 'imageDetails[0].{tags:imageTags,digest:imageDigest,size:imageSizeInBytes,pushedAt:imagePushedAt,scan:imageScanStatus.status}' \
-          --output json
-      - echo "URI para model_image_uri = $IMAGE_URI"
+      - python -m pytest tests/test_emotion_model_v8.py -q
