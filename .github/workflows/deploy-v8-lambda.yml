@@ -1,4 +1,5 @@
-﻿name: Deploy EmotionLab V8 Images
+﻿
+name: Deploy EmotionLab V8 Images
 
 on:
   workflow_dispatch:
@@ -50,7 +51,7 @@ jobs:
       - name: Set image tags
         shell: bash
         run: |
-          echo "IMAGE_TAG=${GITHUB_SHA}" >> "$GITHUB_ENV"
+          echo "IMAGE_TAG=${GITHUB_SHA}-lambda" >> "$GITHUB_ENV"
           echo "ECR_REGISTRY=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com" >> "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
@@ -62,6 +63,8 @@ jobs:
           context: .
           file: infrastructure/deploy/backend_v8/Dockerfile
           platforms: linux/amd64
+          provenance: false
+          sbom: false
           push: true
           tags: ${{ env.ECR_REGISTRY }}/${{ env.BACKEND_REPOSITORY }}:${{ env.IMAGE_TAG }}
 
@@ -71,5 +74,7 @@ jobs:
           context: .
           file: infrastructure/deploy/model_v8_lambda/Dockerfile
           platforms: linux/amd64
+          provenance: false
+          sbom: false
           push: true
           tags: ${{ env.ECR_REGISTRY }}/${{ env.MODEL_REPOSITORY }}:${{ env.IMAGE_TAG }}
