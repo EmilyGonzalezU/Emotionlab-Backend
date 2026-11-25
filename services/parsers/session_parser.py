@@ -1,12 +1,12 @@
-"""Lectura centralizada del JSON real de AWS para una sesión individual.
+﻿"""Lectura centralizada del JSON real de AWS para una sesiÃ³n individual.
 
-Este parser NO pertenece al modelo de IA: el único modelo vigente es el
+Este parser NO pertenece al modelo de IA: el Ãºnico modelo vigente es el
 K-Means V2, cuyo contrato de seis variables se extrae con
 ``services.parsers.emotion_v2_parser.EmotionV2Parser``.
 
 Su responsabilidad es exclusivamente interpretar el JSON de Unity/AWS y
-normalizar los metadatos de la ficha de la sesión (fechas, duración, edad,
-género, dificultad) para el dashboard y los reportes.
+normalizar los metadatos de la ficha de la sesiÃ³n (fechas, duraciÃ³n, edad,
+gÃ©nero, dificultad) para el dashboard y los reportes.
 """
 
 import re
@@ -59,10 +59,10 @@ class SessionParser:
 
     DIFFICULTY_MAPPING = {
         "facil": "facil",
-        "fácil": "facil",
+        "fÃ¡cil": "facil",
         "medio": "medio",
         "dificil": "dificil",
-        "difícil": "dificil",
+        "difÃ­cil": "dificil",
     }
 
     def __init__(self, record: Mapping[str, Any]):
@@ -209,7 +209,7 @@ class SessionParser:
 
                 return parsed
 
-        # raíz
+        # raÃ­z
         for key in keys_to_check:
 
             parsed = self._parse_date(
@@ -452,7 +452,7 @@ class SessionParser:
         )
 
     # =========================================================
-    # DURACIÓN
+    # DURACIÃ“N
     # =========================================================
 
     def _calculate_duration(self) -> int:
@@ -467,7 +467,7 @@ class SessionParser:
 
         if end is None:
             raise ValueError(
-                "La sesión aún no terminó."
+                "La sesiÃ³n aÃºn no terminÃ³."
             )
 
         elapsed = (
@@ -476,7 +476,7 @@ class SessionParser:
 
         if elapsed <= 0:
             raise ValueError(
-                "Duración inválida."
+                "DuraciÃ³n invÃ¡lida."
             )
 
         return max(
@@ -557,7 +557,7 @@ class SessionParser:
         return int(age_digits)
 
     # =========================================================
-    # GÉNERO
+    # GÃ‰NERO
     # =========================================================
 
     def _normalize_gender(
@@ -617,7 +617,7 @@ class SessionParser:
         if val_cleaned not in self.DIFFICULTY_MAPPING:
 
             raise ValueError(
-                f"Dificultad inválida: {value}"
+                f"Dificultad invÃ¡lida: {value}"
             )
 
         return self.DIFFICULTY_MAPPING[
@@ -633,7 +633,7 @@ class SessionParser:
         )
 
         # IMPORTANTE:
-        # vacío o None = dato faltante.
+        # vacÃ­o o None = dato faltante.
         # No inventamos una dificultad.
 
         if (
@@ -682,7 +682,7 @@ class SessionParser:
         }
 
     # =========================================================
-    # MÉTODOS AUXILIARES
+    # MÃ‰TODOS AUXILIARES
     # =========================================================
 
     def get_answers(self) -> list:
@@ -733,3 +733,4 @@ class SessionParser:
 
         except (TypeError, ValueError):
             return None
+

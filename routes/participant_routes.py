@@ -2,7 +2,7 @@
 
 from flask import Blueprint, current_app, g, jsonify, request
 
-from core.roles import ROLE_ADMIN, ROLE_TEACHER
+from core.roles import ROLE_TEACHER
 from middleware.jwt_required import jwt_required
 from middleware.roles_required import roles_required
 
@@ -18,31 +18,23 @@ def _get_service():
     """Obtiene el ParticipantService registrado en Flask."""
     return current_app.extensions["services"]["participant_service"]
 
-def _is_admin():
-    user = getattr(g, "current_user", None) or {}
-    return user.get("rol") == ROLE_ADMIN
-
 def _actor_uid():
     user = getattr(g, "current_user", None) or {}
     claims = getattr(g, "current_claims", None) or {}
     return str(user.get("uid") or user.get("sub") or claims.get("sub") or "")
 
 def _visible(participant):
-    if _is_admin():
-        return True
     uid = _actor_uid()
     if not uid or not participant:
         return False
     if str(participant.get("created_by") or "") == uid:
         return True
-    sessions = current_app.extensions["services"]["session_service"].list_sessions()
+    sessions = current_app.extensions["services"]["session_service"].list_sessions(include_raw_json=False)
     return any(s.get("owner_id") == uid and s.get("participant_id") == participant.get("participant_id") for s in sessions)
 
 def _visible_many(participants):
-    if _is_admin():
-        return participants
     uid = _actor_uid()
-    sessions = current_app.extensions["services"]["session_service"].list_sessions() if uid else []
+    sessions = current_app.extensions["services"]["session_service"].list_sessions(include_raw_json=False) if uid else []
     owned_ids = {s.get("participant_id") for s in sessions if s.get("owner_id") == uid and s.get("participant_id")}
     return [p for p in participants if p.get("created_by") == uid or p.get("participant_id") in owned_ids]
 
@@ -53,7 +45,7 @@ def _visible_many(participants):
 
 @participants_bp.get("")
 @jwt_required
-@roles_required(ROLE_ADMIN, ROLE_TEACHER)
+@roles_required(ROLE_TEACHER)
 def list_participants():
     """
     Lista todos los participantes.
@@ -81,7 +73,7 @@ def list_participants():
 
 @participants_bp.get("/search")
 @jwt_required
-@roles_required(ROLE_ADMIN, ROLE_TEACHER)
+@roles_required(ROLE_TEACHER)
 def search_participants():
     """
     Busca participantes por coincidencia parcial de nombre.
@@ -107,7 +99,7 @@ def search_participants():
 
 @participants_bp.post("")
 @jwt_required
-@roles_required(ROLE_ADMIN, ROLE_TEACHER)
+@roles_required(ROLE_TEACHER)
 def create_participant():
     """
     Selecciona un participante existente mediante participant_id o crea uno
@@ -202,7 +194,7 @@ def create_participant():
 
 @participants_bp.get("/<participant_id>")
 @jwt_required
-@roles_required(ROLE_ADMIN, ROLE_TEACHER)
+@roles_required(ROLE_TEACHER)
 def get_participant(participant_id):
     """
     Obtiene un participante mediante su ID anonimizado.
@@ -237,7 +229,7 @@ def get_participant(participant_id):
 
 @participants_bp.patch("/<participant_id>")
 @jwt_required
-@roles_required(ROLE_ADMIN, ROLE_TEACHER)
+@roles_required(ROLE_TEACHER)
 def update_participant(participant_id):
     """
     Actualiza las observaciones de un participante.

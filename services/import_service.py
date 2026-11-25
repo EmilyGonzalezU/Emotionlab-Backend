@@ -25,6 +25,17 @@ BatchInput = Union[
 ]
 
 
+def public_import_summary(result: Mapping[str, Any]) -> dict[str, int]:
+    """Summarize global ingestion without returning session identifiers."""
+    return {
+        "importadas": len(result.get("pending_identification") or []),
+        "agregadas": len(result.get("aggregated") or []),
+        "errores": len(result.get("import_errors") or []),
+        "omitidas_existentes": len(result.get("skipped_existing") or []),
+        "total": int(result.get("total") or 0),
+    }
+
+
 class ImportService:
     """
     Servicio encargado de importar sesiones provenientes de AWS/Unity.

@@ -538,6 +538,7 @@ class DynamoDBService:
         exclusive_start_key: Optional[
             Mapping[str, Any]
         ] = None,
+        projection_expression: Optional[str] = None,
     ) -> tuple[
         list[dict[str, Any]],
         Optional[dict[str, Any]],
@@ -565,6 +566,9 @@ class DynamoDBService:
             kwargs[
                 "FilterExpression"
             ] = filter_expression
+
+        if projection_expression:
+            kwargs["ProjectionExpression"] = projection_expression
 
         if expression_attribute_names:
             kwargs[
@@ -616,6 +620,7 @@ class DynamoDBService:
         ] = None,
         scan_index_forward: bool = True,
         max_items: Optional[int] = None,
+        projection_expression: Optional[str] = None,
     ) -> list[dict[str, Any]]:
 
         """Realiza query paginando hasta el final."""
@@ -642,25 +647,28 @@ class DynamoDBService:
                 if remaining <= 0:
                     break
 
-            items, last_key = self.query(
-                table_name=table_name,
-                key_condition_expression=(
+            query_kwargs = {
+                "table_name": table_name,
+                "key_condition_expression": (
                     key_condition_expression
                 ),
-                index_name=index_name,
-                filter_expression=filter_expression,
-                expression_attribute_names=(
+                "index_name": index_name,
+                "filter_expression": filter_expression,
+                "expression_attribute_names": (
                     expression_attribute_names
                 ),
-                expression_attribute_values=(
+                "expression_attribute_values": (
                     expression_attribute_values
                 ),
-                scan_index_forward=(
+                "scan_index_forward": (
                     scan_index_forward
                 ),
-                limit=remaining,
-                exclusive_start_key=last_key,
-            )
+                "limit": remaining,
+                "exclusive_start_key": last_key,
+            }
+            if projection_expression:
+                query_kwargs["projection_expression"] = projection_expression
+            items, last_key = self.query(**query_kwargs)
 
             all_items.extend(items)
 

@@ -1,5 +1,7 @@
 """Rutas para el seguimiento de experiencias por session_id."""
 
+import sys
+
 from flask import Blueprint, current_app, g, jsonify, request
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -25,6 +27,13 @@ def _get_tracking_service():
             "El seguimiento requiere almacenamiento DynamoDB."
         )
 
+    return service
+
+
+def _get_report_request_service():
+    service = current_app.extensions["services"].get("report_request_service")
+    if service is None:
+        raise RuntimeError("El servicio de solicitudes de informes no está disponible.")
     return service
 
 
@@ -65,6 +74,19 @@ def _tracking_public(tracking):
 
 def _handle_service_error(message):
     current_app.logger.exception(message)
+
+    exception = sys.exc_info()[1]
+    if isinstance(exception, ClientError):
+        error = exception.response.get("Error", {})
+        detail = str(error.get("Message") or "").lower()
+        if (
+            error.get("Code") == "ValidationException"
+            and "gsi-sessions-tracking" in detail
+        ):
+            return jsonify({
+                "error": "El índice de sesiones de Seguimiento no está disponible en DynamoDB.",
+                "code": "TRACKING_INDEX_UNAVAILABLE",
+            }), 503
 
     return jsonify(
         {
@@ -262,6 +284,63 @@ def get_tracking_sessions(tracking_id):
         return _handle_service_error(
             "No se pudieron obtener las sesiones del seguimiento."
         )
+
+
+@trackings_bp.post("/<tracking_id>/report-requests")
+@jwt_required
+@roles_required(ROLE_TEACHER)
+def create_tracking_report_request(tracking_id):
+    actor = _actor_context()
+    try:
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict) or set(payload) - {"report_format"}:
+            return jsonify({"error": "La solicitud contiene campos no válidos."}), 400
+        report_format = str(payload.get("report_format") or "PDF").upper()
+        if report_format not in {"PDF", "XLSX"}:
+            return jsonify({"error": "El formato debe ser PDF o XLSX."}), 400
+        item = _get_report_request_service().create_tracking_request(
+            tracking_id,
+            requester_uid=actor["actor_uid"],
+            requester_email=actor["actor_email"],
+            requester_rol=actor["actor_rol"],
+            report_format=report_format,
+        )
+        return jsonify(item), 201
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 409
+    except PermissionError:
+        return jsonify({"error": "Seguimiento no disponible."}), 404
+    except RuntimeError as error:
+        return jsonify({"error": str(error)}), 503
+    except Exception:
+        current_app.logger.exception("No se pudo crear la solicitud del informe de seguimiento.")
+        return jsonify({"error": "No se pudo crear la solicitud del informe."}), 500
+
+
+@trackings_bp.get("/<tracking_id>/report-requests/<request_id>/download")
+@jwt_required
+@roles_required(ROLE_TEACHER)
+def download_tracking_report(tracking_id, request_id):
+    actor = _actor_context()
+    try:
+        url = _get_report_request_service().get_tracking_download_url(
+            tracking_id,
+            request_id,
+            actor_uid=actor["actor_uid"],
+            actor_email=actor["actor_email"],
+            actor_rol=actor["actor_rol"],
+            expires_in=300,
+        )
+        return jsonify({"download_url": url, "expires_in_seconds": 300}), 200
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 409
+    except PermissionError:
+        return jsonify({"error": "Solicitud no encontrada."}), 404
+    except RuntimeError as error:
+        return jsonify({"error": str(error)}), 503
+    except Exception:
+        current_app.logger.exception("No se pudo descargar el informe de seguimiento.")
+        return jsonify({"error": "No se pudo obtener el archivo solicitado."}), 500
 
 
 # ==========================================================

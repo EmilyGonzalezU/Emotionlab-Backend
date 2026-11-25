@@ -1,12 +1,12 @@
 """
-Generación de reportes PDF y Excel para sesiones de EmotionLab.
+GeneraciÃ³n de reportes PDF y Excel para sesiones de EmotionLab.
 
 ETAPA 2:
 - Todos los informes incluyen Aviso Legal.
-- El PDF de una solicitud muestra el detalle completo de la sesión
+- El PDF de una solicitud muestra el detalle completo de la sesiÃ³n
   solicitada.
-- El PDF incluye además un resumen histórico del participante,
-  sin exponer el detalle de las demás sesiones.
+- El PDF incluye ademÃ¡s un resumen histÃ³rico del participante,
+  sin exponer el detalle de las demÃ¡s sesiones.
 - Los valores ausentes se presentan mediante texto legible.
 - Los PDF generados se almacenan en S3 privado mediante S3Service.
 """
@@ -17,6 +17,7 @@ from io import BytesIO
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Optional
 import os
+import json
 
 import reportlab
 from reportlab.pdfbase import pdfmetrics
@@ -57,38 +58,30 @@ if TYPE_CHECKING:
 # Texto EXACTO del Aviso Legal - Seccion 9.
 # NO MODIFICAR sin aprobacion.
 _LEGAL_DISCLAIMER_TEXT = (
-    "La información presentada corresponde a una sugerencia generada con apoyo de "
+    "La informaciÃ³n presentada corresponde a una sugerencia generada con apoyo de "
     "inteligencia artificial y constituye una herramienta complementaria para la "
-    "evaluación profesional. No corresponde a un diagnóstico médico ni reemplaza el "
+    "evaluaciÃ³n profesional. No corresponde a un diagnÃ³stico mÃ©dico ni reemplaza el "
     "criterio del profesional."
 )
 
 
 def _register_pdf_fonts() -> None:
     """Registra una fuente Unicode incluida con ReportLab, sin depender del SO."""
-    try:
-        pdfmetrics.getFont("EmotionLabVera")
-        return
-    except KeyError:
-        pass
-
     fonts_dir = os.path.join(os.path.dirname(reportlab.__file__), "fonts")
+    fonts = (
+        ("EmotionLabVera", "Vera.ttf"),
+        ("EmotionLabVera-Bold", "VeraBd.ttf"),
+        ("EmotionLabVera-Italic", "VeraIt.ttf"),
+        ("EmotionLabVera-BoldItalic", "VeraBI.ttf"),
+    )
+    for name, filename in fonts:
+        try:
+            pdfmetrics.getFont(name)
+        except KeyError:
+            pdfmetrics.registerFont(TTFont(name, os.path.join(fonts_dir, filename)))
 
-    pdfmetrics.registerFont(
-        TTFont("EmotionLabVera", os.path.join(fonts_dir, "Vera.ttf"))
-    )
-    pdfmetrics.registerFont(
-        TTFont("EmotionLabVera-Bold", os.path.join(fonts_dir, "VeraBd.ttf"))
-    )
-    pdfmetrics.registerFont(
-        TTFont("EmotionLabVera-Italic", os.path.join(fonts_dir, "VeraIt.ttf"))
-    )
-    pdfmetrics.registerFont(
-        TTFont(
-            "EmotionLabVera-BoldItalic",
-            os.path.join(fonts_dir, "VeraBI.ttf"),
-        )
-    )
+    # Always register the family mapping. The normal font can already exist
+    # in a warm worker even if a previous code path never registered its family.
     registerFontFamily(
         "EmotionLabVera",
         normal="EmotionLabVera",
@@ -111,6 +104,16 @@ class ReportService:
         )
         self.s3 = s3_service
 
+    @staticmethod
+    def _sessions_for_owner(
+        sessions: list[dict],
+        owner_id: Optional[str],
+    ) -> list[dict]:
+        """Limit a participant history to the session owner's scope."""
+        if not owner_id:
+            return []
+        return [session for session in sessions if session.get("owner_id") == owner_id]
+
     # ==========================================================
     # PDF
     # ==========================================================
@@ -118,59 +121,69 @@ class ReportService:
     def generate_individual_pdf(
         self,
         session_id: str,
+        *,
+        owner_id: Optional[str] = None,
+        session_data: Optional[Mapping[str, Any]] = None,
     ) -> bytes:
         """
         Genera el PDF correspondiente a una solicitud de reporte.
 
         El PDF contiene:
 
-        1. Detalle completo de la sesión solicitada.
-        2. Resultado de IA (modelo V2 K-Means) de esa sesión.
-        3. Respuestas y eventos de esa sesión.
-        4. Resumen histórico del participante:
-           ID de sesión, fecha, hora, estado, grupo K-Means,
-           estado del análisis y versión del modelo.
+        1. Detalle completo de la sesiÃ³n solicitada.
+        2. Resultado de IA (modelo V2 K-Means) de esa sesiÃ³n.
+        3. Respuestas y eventos de esa sesiÃ³n.
+        4. Resumen histÃ³rico del participante:
+           ID de sesiÃ³n, fecha, hora, estado, grupo K-Means,
+           estado del anÃ¡lisis y versiÃ³n del modelo.
         5. Aviso legal.
         """
 
         # ======================================================
-        # 1. OBTENER SESIÓN SOLICITADA
+        # 1. OBTENER SESIÃ“N SOLICITADA
         # ======================================================
 
-        session = self.session_service.get_session_detail(
-            session_id
+        session = (
+            dict(session_data)
+            if session_data is not None
+            else self.session_service.get_session_detail(session_id)
         )
 
         if not session:
             raise SessionNotFound(
-                "La sesión no existe"
+                "La sesiÃ³n no existe"
             )
+
+        session_owner = session.get("owner_id")
+        if owner_id and session_owner != owner_id:
+            raise SessionNotFound("La sesiÃ³n no estÃ¡ disponible")
+        history_owner = owner_id or session_owner
 
         participant_id = session.get(
             "participant_id"
         )
-
-        if (
-            not participant_id
-            or participant_id == "__PENDING__"
-        ):
-            raise ValueError(
-                "La sesión no tiene un participante identificado. "
-                "No se puede generar el reporte."
-            )
+        if participant_id == "__PENDING__":
+            participant_id = None
 
         # ======================================================
-        # 2. OBTENER HISTORIAL DEL PARTICIPANTE
+        # 2. OBTENER HISTORIAL, SI LA SESIÃ“N TIENE PARTICIPANTE
         # ======================================================
 
-        historical_sessions = (
-            self.session_service.search_participant_sessions(
-                participant_id
+        historical_sessions = []
+        if participant_id and participant_id != "__PENDING__":
+            historical_sessions = (
+                self.session_service.search_participant_sessions(participant_id)
+                or []
             )
-            or []
+
+        # Participant IDs are pseudonymous but may be shared or reused. A
+        # specialist's report must never include another owner's records.
+        historical_sessions = self._sessions_for_owner(
+            historical_sessions,
+            history_owner,
         )
 
-        # Aseguramos que la sesión solicitada aparezca.
+        # Aseguramos que la sesiÃ³n solicitada aparezca.
         session_ids = {
             str(item.get("session_id"))
             for item in historical_sessions
@@ -179,7 +192,7 @@ class ReportService:
         if str(session_id) not in session_ids:
             historical_sessions.append(session)
 
-        # Más reciente primero.
+        # MÃ¡s reciente primero.
         historical_sessions.sort(
             key=lambda item: (
                 str(item.get("fecha") or ""),
@@ -261,7 +274,7 @@ class ReportService:
 
         story.append(
             Paragraph(
-                "Reporte de sesión",
+                "Reporte de sesiÃ³n",
                 subtitle_style,
             )
         )
@@ -269,7 +282,7 @@ class ReportService:
         header_data = [
             [
                 Paragraph(
-                    "<b>ID de sesión</b>",
+                    "<b>ID de sesiÃ³n</b>",
                     small_style,
                 ),
                 self._display(
@@ -279,9 +292,7 @@ class ReportService:
                     "<b>Participante</b>",
                     small_style,
                 ),
-                self._display(
-                    participant_id
-                ),
+                self._display(participant_id, "No asignado"),
             ],
             [
                 Paragraph(
@@ -404,17 +415,17 @@ class ReportService:
             [
                 [
                     Paragraph(
-                        "<b>Clasificación</b>",
+                        "<b>ClasificaciÃ³n</b>",
                         small_style,
                     ),
                     grupo,
                     Paragraph(
-                        "<b>Análisis</b>",
+                        "<b>AnÃ¡lisis</b>",
                         small_style,
                     ),
                     estado_analisis,
                     Paragraph(
-                        "<b>Versión modelo</b>",
+                        "<b>VersiÃ³n modelo</b>",
                         small_style,
                     ),
                     version_modelo,
@@ -489,12 +500,12 @@ class ReportService:
         story.append(ia_table)
 
         # ======================================================
-        # 6. DETALLE DE LA SESIÓN
+        # 6. DETALLE DE LA SESIÃ“N
         # ======================================================
 
         story.append(
             Paragraph(
-                "Detalle de la sesión",
+                "Detalle de la sesiÃ³n",
                 section_style,
             )
         )
@@ -538,7 +549,7 @@ class ReportService:
                     session.get("edad")
                 ),
                 Paragraph(
-                    "<b>Género</b>",
+                    "<b>GÃ©nero</b>",
                     small_style,
                 ),
                 self._display(
@@ -554,7 +565,7 @@ class ReportService:
                     dificultad
                 ),
                 Paragraph(
-                    "<b>Duración</b>",
+                    "<b>DuraciÃ³n</b>",
                     small_style,
                 ),
                 (
@@ -661,7 +672,7 @@ class ReportService:
 
         story.append(
             Paragraph(
-                "Respuestas de la sesión",
+                "Respuestas de la sesiÃ³n",
                 section_style,
             )
         )
@@ -714,10 +725,10 @@ class ReportService:
         else:
             answers.append(
                 [
-                    "—",
+                    "â€”",
                     "No se registraron respuestas.",
-                    "—",
-                    "—",
+                    "â€”",
+                    "â€”",
                 ]
             )
 
@@ -739,7 +750,7 @@ class ReportService:
 
         story.append(
             Paragraph(
-                "Eventos de la sesión",
+                "Eventos de la sesiÃ³n",
                 section_style,
             )
         )
@@ -780,9 +791,9 @@ class ReportService:
         else:
             events.append(
                 [
-                    "—",
-                    "No se registraron eventos durante la sesión.",
-                    "—",
+                    "â€”",
+                    "No se registraron eventos durante la sesiÃ³n.",
+                    "â€”",
                 ]
             )
 
@@ -798,14 +809,14 @@ class ReportService:
         )
 
         # ======================================================
-        # 9. RESUMEN HISTÓRICO
+        # 9. RESUMEN HISTÃ“RICO
         # ======================================================
 
         story.append(PageBreak())
 
         story.append(
             Paragraph(
-                "Resumen histórico del participante",
+                "Resumen histÃ³rico de sesiones",
                 section_style,
             )
         )
@@ -813,10 +824,7 @@ class ReportService:
         story.append(
             Paragraph(
                 (
-                    "La siguiente tabla muestra únicamente un "
-                    "resumen de las sesiones asociadas al mismo "
-                    "participante. El detalle de las demás sesiones "
-                    "no forma parte de este reporte."
+                    "La siguiente tabla resume las sesiones asociadas a esta solicitud. El detalle de las demás sesiones no forma parte de este reporte."
                 ),
                 ParagraphStyle(
                     "EmotionLabBodyUnicode",
@@ -832,13 +840,13 @@ class ReportService:
 
         history = [
             [
-                "ID de sesión",
+                "ID de sesiÃ³n",
                 "Fecha",
                 "Hora",
                 "Estado",
-                "Clasificación",
-                "Análisis",
-                "Versión modelo",
+                "ClasificaciÃ³n",
+                "AnÃ¡lisis",
+                "VersiÃ³n modelo",
             ]
         ]
 
@@ -910,13 +918,13 @@ class ReportService:
         history_table = self._table(
             history,
             [
-                120,  # ID de sesión
+                120,  # ID de sesiÃ³n
                 70,   # Fecha
                 50,   # Hora
                 70,   # Estado
-                65,   # Clasificación
-                75,   # Análisis
-                70,   # Versión modelo
+                65,   # ClasificaciÃ³n
+                75,   # AnÃ¡lisis
+                70,   # VersiÃ³n modelo
             ],
         )
 
@@ -1022,9 +1030,10 @@ class ReportService:
         *,
         request_id: Optional[str] = None,
         filename_hint: Optional[str] = None,
+        owner_id: Optional[str] = None,
     ) -> tuple[bytes, str]:
         """
-        Genera el PDF de la sesión y lo almacena en S3 privado.
+        Genera el PDF de la sesiÃ³n y lo almacena en S3 privado.
         """
 
         if self.s3 is None:
@@ -1044,16 +1053,13 @@ class ReportService:
             "participant_id"
         )
 
-        if (
-            not participant_id
-            or participant_id == "__PENDING__"
-        ):
-            raise ValueError(
-                "La sesión no tiene un participante identificado."
-            )
+        if owner_id and session_data.get("owner_id") != owner_id:
+            raise SessionNotFound("La sesiÃ³n no estÃ¡ disponible")
 
         pdf_bytes = self.generate_individual_pdf(
-            session_id
+            session_id,
+            owner_id=owner_id or session_data.get("owner_id"),
+            session_data=session_data,
         )
 
         fecha_stamp = (
@@ -1066,9 +1072,7 @@ class ReportService:
         fname = (
             filename_hint
             or (
-                f"reporte_sesion_{session_id}_"
-                f"participante_{participant_id}_"
-                f"{fecha_stamp}.pdf"
+                f"reporte_sesion_{session_id}_{fecha_stamp}.pdf"
             )
         )
 
@@ -1085,6 +1089,163 @@ class ReportService:
         )
 
         return pdf_bytes, s3_key
+
+    def generate_and_upload_tracking_pdf(
+        self,
+        tracking: dict,
+        associated_sessions: list[dict],
+        *,
+        request_id: str,
+        owner_id: str,
+    ) -> tuple[bytes, str]:
+        """Generate a tracking PDF from its currently assigned, owner-verified sessions."""
+        if self.s3 is None:
+            raise RuntimeError("S3Service no inyectado en ReportService")
+        tracking_id = str(tracking.get("tracking_id") or "")
+        if not tracking_id or not owner_id or not associated_sessions:
+            raise ValueError("El seguimiento no tiene sesiones disponibles para el informe.")
+
+        full_sessions = []
+        seen = set()
+        for association in associated_sessions:
+            session_id = str(association.get("session_id") or "").strip()
+            if not session_id or session_id in seen:
+                continue
+            seen.add(session_id)
+            # ReportRequestService passes the current, owner-verified session
+            # snapshot. Reuse it without another DynamoDB lookup. Keep the
+            # legacy direct-call path for entries that contain only a session ID.
+            if association.get("owner_id") is None:
+                session = self.session_service.get_session_detail(session_id)
+            elif association.get("owner_id") != owner_id:
+                session = dict(association)
+            else:
+                materialize = getattr(self.session_service, "_materialize_raw_json", None)
+                session = materialize(association) if callable(materialize) else dict(association)
+                session = session or dict(association)
+            if (
+                not session
+                or session.get("owner_id") != owner_id
+            ):
+                raise SessionNotFound("El seguimiento no estÃ¡ disponible")
+            full_sessions.append(session)
+
+        if not full_sessions:
+            raise ValueError("El seguimiento no tiene sesiones disponibles para el informe.")
+
+        full_sessions.sort(key=lambda item: (
+            str(item.get("fecha") or item.get("capture_started_at") or ""),
+            str(item.get("hora") or ""),
+            str(item.get("session_id") or ""),
+        ))
+
+        from services.tracking_report_pdf import build_tracking_pdf
+
+        pdf_bytes = build_tracking_pdf(tracking, full_sessions, owner_id)
+        if not pdf_bytes:
+            raise RuntimeError("El PDF generado estÃ¡ vacÃ­o")
+
+        date_stamp = datetime.utcnow().strftime("%Y-%m-%d")
+        tracking_code = str(tracking.get("tracking_code") or tracking_id)
+        filename = f"reporte_seguimiento_{tracking_code}_{date_stamp}.pdf"
+        s3_key = f"reports/{date_stamp}/{request_id}/{filename}"
+        self.s3.put_report_pdf(s3_key, pdf_bytes)
+        return pdf_bytes, s3_key
+
+    def generate_and_upload_tracking_excel(
+        self,
+        tracking: dict,
+        associated_sessions: list[dict],
+        *,
+        request_id: str,
+        owner_id: str,
+    ) -> tuple[bytes, str]:
+        """Build and store an owner-verified workbook for a tracking request."""
+        if self.s3 is None:
+            raise RuntimeError("S3Service no inyectado en ReportService")
+        if not owner_id or not associated_sessions:
+            raise ValueError("El seguimiento no tiene sesiones disponibles para el informe.")
+        workbook = Workbook()
+        sessions_sheet = workbook.active
+        sessions_sheet.title = "Sesiones"
+        sessions_sheet.append(["Sesión", "Fecha", "Hora", "Estado", "Grupo", "Versión del modelo"])
+        answers_sheet = workbook.create_sheet("Respuestas")
+        answers_sheet.append(["Sesión", "Etapa", "Pregunta", "Respuesta"])
+        model_sheet = workbook.create_sheet("Respuestas del cálculo")
+        model_sheet.append(["Sesión", "Dimensión", "Fase", "Variable", "Valor original"])
+        for sheet in (sessions_sheet, answers_sheet, model_sheet):
+            for cell in sheet[1]:
+                cell.font = Font(bold=True)
+        seen = set()
+        full_sessions = []
+        for association in associated_sessions:
+            session_id = str(association.get("session_id") or "").strip()
+            if not session_id or session_id in seen:
+                continue
+            seen.add(session_id)
+            session = self.session_service.get_session_detail(session_id)
+            if not session or session.get("owner_id") != owner_id:
+                raise SessionNotFound("El seguimiento no está disponible")
+            full_sessions.append(session)
+        full_sessions.sort(key=lambda item: (str(item.get("fecha") or item.get("capture_started_at") or ""), str(item.get("hora") or ""), str(item.get("session_id") or "")))
+        for session in full_sessions:
+            detail = session.get("model_processing") if isinstance(session.get("model_processing"), dict) else {}
+            prediction = detail.get("prediction") if isinstance(detail.get("prediction"), dict) else {}
+            sessions_sheet.append([session.get("session_id"), session.get("fecha") or session.get("capture_started_at"), session.get("hora"), session.get("status") or session.get("estado"), prediction.get("group", detail.get("kmeans_group", detail.get("grupo", detail.get("group")))), detail.get("model_version")])
+            original_variables = detail.get("variables_originales") if isinstance(detail.get("variables_originales"), dict) else {}
+            estimated = set(detail.get("estimadas", [])) if isinstance(detail.get("estimadas"), (list, tuple, set)) else set()
+            for variable, value in original_variables.items():
+                if variable in estimated or isinstance(value, bool) or not isinstance(value, (int, float)) or not 1 <= value <= 9:
+                    continue
+                normalized = str(variable).lower()
+                phase = "PRE" if normalized.endswith("_pre") or normalized.endswith("_inicial") else "FACIL" if "facil" in normalized else "DIFICIL" if "dificil" in normalized else "Sin identificar"
+                dimension = next((name for name in ("estado_emocional", "nerviosismo", "preocupacion", "preparacion", "satisfaccion", "alivio") if name in normalized), "Sin identificar")
+                model_sheet.append([session.get("session_id"), dimension, phase, variable, value])
+            raw = session.get("raw_json") or session.get("respuestas_originales") or session.get("responses") or session.get("respuestas") or []
+            if isinstance(raw, str):
+                try:
+                    raw = json.loads(raw)
+                except (TypeError, ValueError):
+                    raw = []
+            if isinstance(raw, dict):
+                nested = raw.get("experiences") or raw.get("experiencias") or raw.get("experiences_data")
+                if isinstance(nested, list) and nested:
+                    records = nested
+                else:
+                    records = [raw]
+            elif isinstance(raw, list):
+                records = raw
+            else:
+                records = []
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                raw_answers = record.get("respuestas") or record.get("responses") or record.get("answers") or []
+                if isinstance(raw_answers, list):
+                    for answer in raw_answers:
+                        if not isinstance(answer, dict):
+                            continue
+                        question_id = str(answer.get("idPregunta") or answer.get("id_pregunta") or answer.get("question_id") or answer.get("id") or "").strip().lower()
+                        question = str(answer.get("pregunta") or answer.get("question") or "").strip().lower()
+                        personal_ids = {"edad", "age", "student_age", "genero", "género", "gender", "student_gender", "nombre", "name", "student_name", "nombre_alumno"}
+                        if question_id in personal_ids or any(term in question for term in ("edad", "age", "género", "genero", "gender", "nombre", "name")):
+                            continue
+                        answers_sheet.append([session.get("session_id"), answer.get("etapa") or answer.get("fase") or answer.get("scene"), answer.get("pregunta") or answer.get("question") or answer.get("idPregunta") or answer.get("question_id"), answer.get("respuestaLabel", answer.get("respuesta", answer.get("answer", answer.get("value"))))])
+        for sheet in (sessions_sheet, answers_sheet, model_sheet):
+            sheet.freeze_panes = "A2"
+            sheet.auto_filter.ref = sheet.dimensions
+            for column in sheet.columns:
+                letter = column[0].column_letter
+                sheet.column_dimensions[letter].width = min(52, max(14, max((len(str(cell.value or "")) for cell in column), default=10) + 2))
+        output = BytesIO()
+        workbook.save(output)
+        file_bytes = output.getvalue()
+        date_stamp = datetime.utcnow().strftime("%Y-%m-%d")
+        tracking_code = str(tracking.get("tracking_code") or tracking.get("tracking_id") or "seguimiento")
+        filename = f"reporte_seguimiento_{tracking_code}_{date_stamp}.xlsx"
+        s3_key = f"reports/{date_stamp}/{request_id}/{filename}"
+        self.s3.put_report_excel(s3_key, file_bytes)
+        return file_bytes, s3_key
 
     # ==========================================================
     # EXCEL GLOBAL
@@ -1198,7 +1359,7 @@ class ReportService:
         fallback: str = "No registrado",
     ) -> str:
         """
-        Convierte valores vacíos o ausentes en texto legible.
+        Convierte valores vacÃ­os o ausentes en texto legible.
         """
 
         if value is None:
@@ -1256,9 +1417,9 @@ class ReportService:
         """
         Construye tablas PDF con texto envolvente.
 
-        Los IDs de sesión pueden ser cadenas largas sin espacios.
+        Los IDs de sesiÃ³n pueden ser cadenas largas sin espacios.
         Las celdas se convierten en Paragraph para permitir saltos
-        de línea y evitar que el contenido se monte sobre columnas
+        de lÃ­nea y evitar que el contenido se monte sobre columnas
         vecinas.
         """
 
@@ -1386,7 +1547,7 @@ class ReportService:
         """
         Inserta puntos de corte invisibles en cadenas largas.
 
-        El carácter \\u200b no se imprime, pero permite a ReportLab
+        El carÃ¡cter \\u200b no se imprime, pero permite a ReportLab
         dividir correctamente IDs largos sin espacios.
         """
 
@@ -1449,8 +1610,8 @@ class ReportService:
         except ValueError:
             pass
 
-        # También acepta una fecha ISO aunque venga
-        # acompañada de texto adicional.
+        # TambiÃ©n acepta una fecha ISO aunque venga
+        # acompaÃ±ada de texto adicional.
         import re
 
         match = re.match(
@@ -1466,4 +1627,3 @@ class ReportService:
             )
 
         return text
-

@@ -1,0 +1,5 @@
+# Keep the already pinned application and V8 dependency set as the source of truth.
+-r requirements.txt
+
+# ECS/Fargate WSGI server; deliberately not part of the desktop/Lambda requirements.
+gunicorn==23.0.0

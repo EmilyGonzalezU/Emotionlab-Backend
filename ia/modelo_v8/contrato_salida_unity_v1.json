@@ -1,0 +1,58 @@
+{
+    "version_contrato": "1.1.0-experimental",
+    "componente": "EmotionLab Machine Learning",
+    "descripcion": "Contrato de salida del módulo independiente de inferencia para registros JSON de Unity.",
+    "campos_obligatorios": [
+        "version_contrato",
+        "id_participante",
+        "estado",
+        "grupo",
+        "observadas",
+        "estimadas",
+        "variables_sin_datos_suficientes",
+        "variables_originales",
+        "variables_procesadas",
+        "error",
+        "perfil_tension",
+        "indice_relativo_centroides"
+    ],
+    "estados_permitidos": {
+        "calculado_sin_estimacion": "Se asignó un grupo utilizando doce respuestas originales.",
+        "calculado_con_estimacion": "Se asignó un grupo después de estimar respuestas ausentes.",
+        "informacion_insuficiente": "No hay ninguna respuesta válida para realizar la inferencia.",
+        "sin_datos_suficientes": "Una o más variables no pueden estimarse: sin datos suficientes.",
+        "error_entrada": "El registro contiene información incompatible con el formato esperado."
+    },
+    "variables_modelo": [
+        "estado_pre",
+        "nerviosismo_pre",
+        "preocupacion_pre",
+        "preparacion_pre",
+        "estado_facil",
+        "nerviosismo_facil",
+        "satisfaccion_facil",
+        "alivio_facil",
+        "estado_dificil",
+        "nerviosismo_dificil",
+        "satisfaccion_dificil",
+        "alivio_dificil"
+    ],
+    "grupos_permitidos": [
+        0,
+        1
+    ],
+    "descripcion_indice": "Posición relativa entre centroides, limitada a 0-100; no es un diagnóstico ni una probabilidad.",
+    "reglas": {
+        "minimo_respuestas_originales": 1,
+        "requiere_todas_variables_estimables": true,
+        "minimo_fases_con_respuestas": 1,
+        "grupo_insuficiente": null,
+        "grupo_error": null,
+        "sin_imputacion_en_errores": true,
+        "metodo_imputacion": "mediana_personal_solo_indicador_con_observaciones",
+        "usar_mediana_de_otros_estudiantes": false,
+        "total_variables_antes_de_predecir": 12,
+        "imputar_solo_valores_faltantes": true,
+        "incluir_preguntas_adicionales": false
+    }
+}

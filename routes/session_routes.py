@@ -2,9 +2,10 @@
 
 from flask import Blueprint, current_app, g, jsonify, request
 
-from core.roles import ROLE_TEACHER
+from core.roles import ROLE_ADMIN, ROLE_TEACHER
 from middleware.jwt_required import jwt_required
 from middleware.roles_required import roles_required
+from services.import_service import public_import_summary
 
 
 sessions_bp = Blueprint(
@@ -60,12 +61,13 @@ def list_sessions():
     )
 
     sessions = (
-        service.list_sessions_by_date(fecha)
+        service.list_sessions_by_date(fecha, include_raw_json=False)
         if fecha
         else service.list_sessions(
             date_from=request.args.get("date_from"),
             date_to=request.args.get("date_to"),
             status=request.args.get("status"),
+            include_raw_json=False,
         )
     )
 
@@ -303,9 +305,11 @@ def update_session(session_id):
 # IMPORTAR SESIONES DESDE AWS
 # ==========================================================
 
+# This endpoint ingests the global Unity feed. It has no specialist-scoped
+# query, so only administrators may trigger it.
 @sessions_bp.post("/import")
 @jwt_required
-@roles_required(ROLE_TEACHER)
+@roles_required(ROLE_ADMIN)
 def import_sessions():
 
     import_service = current_app.extensions[
@@ -322,9 +326,7 @@ def import_sessions():
             aws_service
         )
 
-        return jsonify(
-            result
-        ), 200
+        return jsonify(public_import_summary(result)), 200
 
     except ValueError as error:
 

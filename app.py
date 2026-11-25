@@ -4,7 +4,30 @@ import os
 import sys
 from pathlib import Path
 
-from dotenv import load_dotenv
+# A direct `python app.py` launch should use the frozen V8 runtime when the
+# repository's local Micromamba environment exists. Keep imports below this
+# bootstrap so a system Python with incompatible scientific packages never
+# initializes the application.
+if __name__ == "__main__":
+    _repo_root = Path(__file__).resolve().parent
+    _runtime_candidates = (
+        _repo_root / ".venv-v8" / "python.exe",
+        _repo_root / ".venv-v8" / "Scripts" / "python.exe",
+        _repo_root / ".venv-v8" / "bin" / "python",
+    )
+    _v8_python = next((path for path in _runtime_candidates if path.is_file()), None)
+    if _v8_python is not None and _v8_python.resolve() != Path(sys.executable).resolve():
+        os.execv(
+            str(_v8_python),
+            [str(_v8_python), str(Path(__file__).resolve()), *sys.argv[1:]],
+        )
+    if sys.version_info[:3] != (3, 13, 18):
+        raise SystemExit(
+            "EmotionLab V8 requiere Python 3.13.18. Instala el entorno .venv-v8 "
+            "o ejecútalo con ese intérprete."
+        )
+
+from dotenv import dotenv_values, load_dotenv
 from flask import Flask, jsonify
 from flask_cors import CORS
 
@@ -27,6 +50,7 @@ def _load_environment():
     # Directorio donde está app.py en desarrollo
     base_dir = Path(__file__).resolve().parent
     development_env = base_dir / ".env"
+    selected_env = development_env
 
     # Cuando estamos ejecutando el EXE generado por PyInstaller
     if getattr(sys, "frozen", False):
@@ -37,27 +61,50 @@ def _load_environment():
         packaged_env = executable_dir.parent / "config" / ".env"
 
         if packaged_env.exists():
-            load_dotenv(
-                dotenv_path=packaged_env,
-                override=False,
-            )
-            return
+            selected_env = packaged_env
 
     # Ejecución normal desde el proyecto
-    if development_env.exists():
-        load_dotenv(
-            dotenv_path=development_env,
-            override=False,
-        )
+    if selected_env.exists():
+        configured_bucket = (dotenv_values(selected_env).get("S3_REPORT_PDFS_BUCKET") or "").strip()
+        inherited_bucket_raw = os.getenv("S3_REPORT_PDFS_BUCKET")
+        inherited_bucket = os.getenv("S3_REPORT_PDFS_BUCKET", "").strip()
+        if inherited_bucket_raw is not None and inherited_bucket != configured_bucket:
+            logging.warning(
+                "S3_REPORT_PDFS_BUCKET del entorno de lanzamiento sobrescribe el valor de %s. "
+                "Bucket efectivo del entorno: %s",
+                selected_env,
+                inherited_bucket or "(vacío)",
+            )
+        load_dotenv(dotenv_path=selected_env, override=False)
+        if inherited_bucket_raw is not None:
+            bucket_source = "entorno del proceso"
+        elif configured_bucket:
+            bucket_source = f"dotenv:{selected_env.resolve()}"
+        else:
+            bucket_source = "sin configuración"
     else:
-        # Fallback
+        # Fallback de dotenv conserva la prioridad del entorno del proceso.
         load_dotenv(override=False)
+        bucket_source = (
+            "entorno del proceso"
+            if os.getenv("S3_REPORT_PDFS_BUCKET") is not None
+            else "sin configuración"
+        )
+
+    # Provenance is intentionally limited to a non-secret diagnostic label.
+    os.environ["EMOTIONLAB_S3_REPORT_BUCKET_SOURCE"] = bucket_source
 
 
 # IMPORTANTE:
 # Esto debe ejecutarse antes de importar los servicios/rutas
 # que utilizan variables de entorno.
 _load_environment()
+
+# Direct local execution means local V8 inference unless the caller explicitly
+# selected a different V8 mode in the process or .env. A legacy V2 remote mode
+# must not disable the current local V8 package.
+if __name__ == "__main__":
+    os.environ.setdefault("EMOTION_MODEL_V8_MODE", "local")
 
 
 from botocore.exceptions import ClientError
@@ -223,44 +270,40 @@ def create_app(services: dict | None = None) -> Flask:
     return app
 
 
-def _build_emotion_v2_engine():
-    """Resuelve el motor de inferencia V2 según ``EMOTION_MODEL_V2_MODE``.
+def _build_emotion_v8_engine():
+    """Construye el motor V8 local o su cliente remoto Lambda."""
 
-    La selección es determinista y NO existe fallback automático:
+    legacy_mode = os.getenv("EMOTION_MODEL_V2_MODE", "").strip().lower()
+    mode = os.getenv("EMOTION_MODEL_V8_MODE", "").strip().lower()
 
-    * ``remote`` -> ``EmotionV2Client`` (requiere ``EMOTION_MODEL_V2_API_URL``).
-    * ``local``  -> ``EmotionModelV2Service`` (entorno con scikit-learn 1.6.1).
+    if not mode:
+        if legacy_mode and legacy_mode != "local":
+            from services.emotion_model_v8_service import EmotionModelV8UnavailableService
 
-    Si el modo remoto no tiene URL configurada, se registra el error y se
-    devuelve el cliente igualmente: el análisis V2 quedará en
-    ``processing_error`` y la captura se conservará intacta.
-    """
-
-    mode = os.getenv("EMOTION_MODEL_V2_MODE", "local").strip().lower()
-
-    if mode == "remote":
-        from services.emotion_v2_client import EmotionV2Client
-
-        client = EmotionV2Client()
-
-        if not client.configured:
-            logging.getLogger(__name__).error(
-                "EMOTION_MODEL_V2_MODE=remote pero EMOTION_MODEL_V2_API_URL "
-                "no está configurada: el análisis V2 quedará en "
-                "processing_error y la captura se conservará."
+            reason = (
+                "La configuraci?n remota existente usa el contrato V2. "
+                "V8 requiere configurar expl?citamente EMOTION_MODEL_V8_MODE."
             )
-
-        return client
+            logging.getLogger(__name__).error(reason)
+            return EmotionModelV8UnavailableService(reason)
+        mode = "local"
 
     if mode == "local":
-        from services.emotion_model_v2_service import EmotionModelV2Service
+        from services.emotion_model_v8_service import EmotionModelV8Service
+        return EmotionModelV8Service()
 
-        return EmotionModelV2Service()
+    if mode == "lambda":
+        from services.emotion_model_v8_lambda_client import EmotionModelV8LambdaClient
+        return EmotionModelV8LambdaClient()
 
-    raise RuntimeError(
-        "EMOTION_MODEL_V2_MODE debe ser 'remote' o 'local' "
-        f"(se recibió: {mode!r})."
+    from services.emotion_model_v8_service import EmotionModelV8UnavailableService
+
+    reason = (
+        f"EMOTION_MODEL_V8_MODE no reconocido: {mode!r}. "
+        "Valores admitidos: local, lambda."
     )
+    logging.getLogger(__name__).error(reason)
+    return EmotionModelV8UnavailableService(reason)
 
 
 def _build_services() -> dict:
@@ -457,13 +500,11 @@ def _build_services() -> dict:
     unity_data_service = UnityDataService()
 
     # ==========================================================
-    # MODELO V2 CONGELADO (K-MEANS) — ÚNICO motor de IA vigente
+    # MODELO V8 CONGELADO (K-MEANS) — ÚNICO motor activo
     # ==========================================================
-    # El motor se resuelve según `EMOTION_MODEL_V2_MODE` (remote|local).
-    # La instanciación NUNCA falla aunque el artefacto o el entorno no estén
-    # disponibles: en ese caso el análisis V2 queda en `processing_error` sin
-    # afectar la captura.
-    emotion_v2_service = _build_emotion_v2_engine()
+    # La instancia valida el manifiesto; la carga Joblib es perezosa y exige
+    # el runtime V8 exacto antes de abrir los artefactos.
+    emotion_v2_service = _build_emotion_v8_engine()
 
     # ==========================================================
     # CICLO DE CAPTURA (EXPERIENCIA DE EMOTIONLAB)
@@ -505,6 +546,7 @@ def _build_services() -> dict:
         session_service=session_service,
         s3_service=s3_service,
         ses_service=ses_service,
+        tracking_service=tracking_service,
     )
 
     # ==========================================================

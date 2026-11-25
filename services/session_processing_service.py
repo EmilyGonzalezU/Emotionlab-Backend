@@ -17,15 +17,12 @@ from typing import Any, Optional
 
 from botocore.exceptions import ClientError
 
-from services.emotion_classification import enriquecer_analisis
-from services.emotion_model_v2_service import (
+from services.emotion_model_v2_contract import (
     ESTADO_ANALIZADO,
     ESTADO_DATOS_INSUFICIENTES,
-    MODEL_VERSION_ESPERADA,
-    EmotionModelV2Service,
 )
 from services.import_service import ImportService
-from services.parsers.emotion_v2_parser import EmotionV2Parser
+from services.parsers.emotion_v8_parser import EmotionV8Parser
 from services.session_parser import SessionParser
 from services.session_service import (
     STATUS_PENDING_IDENTIFICATION,
@@ -108,7 +105,7 @@ class SessionProcessingService:
             "analyzed": 0,
             "insufficient_data": 0,
             "errors": 0,
-            "groups": {"0": 0, "1": 0, "2": 0},
+            "groups": {"0": 0, "1": 0},
             "details": details,
         }
 
@@ -124,13 +121,12 @@ class SessionProcessingService:
                     details.append(detail)
                     continue
 
-                valores = EmotionV2Parser(record).get_model_values()
-                analisis = self.emotion_v2.analyze(session_id, valores)
+                analisis = self.emotion_v2.analyze(session_id, record)
                 status = analisis.get("status")
                 detail["status"] = status
 
                 if status == ESTADO_ANALIZADO:
-                    grupo = int(analisis["prediction"]["group"])
+                    grupo = int(analisis["grupo"])
                     detail["group"] = grupo
                     summary["analyzed"] += 1
                     summary["processable"] += 1
@@ -371,22 +367,26 @@ class SessionProcessingService:
         if self.emotion_v2 is None:
             return
 
-        v2_parser = EmotionV2Parser(record)
-        student_data = v2_parser.get_student_data()
-        valores = v2_parser.get_model_values()
-        extraccion = v2_parser.get_extraction_report()
+        session_data = self._session_data(record)
+        student_data = {
+            "edad": session_data.get("edad"),
+            "genero": session_data.get("genero"),
+            "participant_id": session_data.get("idParticipante"),
+            "fecha_inicio": session_data.get("fechaInicio"),
+            "fecha_fin": session_data.get("fechaFin"),
+            "difficulty_level": session_data.get("difficulty_level"),
+        }
 
         try:
-            analisis = self.emotion_v2.analyze(session_id, valores)
+            analisis = self.emotion_v2.analyze(session_id, record)
         except Exception as error:
-            analisis = EmotionModelV2Service.error_block(error)
-            analisis["session_id"] = session_id
-            analisis["measured_values"] = valores
+            error_builder = getattr(self.emotion_v2, "error_block", None)
+            if callable(error_builder):
+                analisis = error_builder(error, session_id)
+            else:
+                from services.emotion_model_v8_service import build_v8_error_block
 
-        analisis["extraction"] = extraccion
-
-        # Enmascaramiento binario + bienestar promedio (post-predicción).
-        enriquecer_analisis(analisis)
+                analisis = build_v8_error_block(error, session_id)
 
         self.session_service.dynamo.update_item(
             self.session_service.table,
@@ -394,7 +394,7 @@ class SessionProcessingService:
             {
                 "model_processing": analisis,
                 "ai_status": analisis.get("status"),
-                "model_version": MODEL_VERSION_ESPERADA,
+                "model_version": self.emotion_v2.model_version,
                 "student_data": student_data,
             },
         )
@@ -453,9 +453,9 @@ class SessionProcessingService:
 
     @classmethod
     def _has_model_input(cls, record: Mapping[str, Any]) -> bool:
-        """Indica si el registro contiene al menos una variable del contrato V2."""
+        """Indica si el registro contiene respuestas reconocidas por V8."""
         try:
-            valores = EmotionV2Parser(record).get_model_values()
+            valores = EmotionV8Parser(record).get_model_values()
         except Exception:
             return False
         return any(valor is not None for valor in valores.values())

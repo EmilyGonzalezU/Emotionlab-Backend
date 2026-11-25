@@ -186,6 +186,15 @@ def clasificacion_binaria(model_processing: Any) -> Optional[int]:
     if not isinstance(model_processing, Mapping):
         return None
 
+    # V8's 0/1 values are K-Means cluster identifiers, not the legacy
+    # binary masking contract. Preserve them only through classification_original.
+    if (
+        model_processing.get("algorithm") == "KMeans"
+        and model_processing.get("n_clusters") == 2
+        and model_processing.get("model_version") == "1.0.0-experimental"
+    ):
+        return None
+
     final = model_processing.get("classification_final")
 
     if isinstance(final, int) and not isinstance(final, bool) and final in (0, 1):

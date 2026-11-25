@@ -26,7 +26,7 @@ Se mantiene /reports/excel para el reporte general.
 from flask import Blueprint, current_app, g, request, send_file
 from io import BytesIO
 
-from core.roles import ROLE_ADMIN, ROLE_TEACHER
+from core.roles import ROLE_TEACHER
 from middleware.jwt_required import jwt_required
 from middleware.roles_required import roles_required
 
@@ -44,7 +44,7 @@ reports_bp = Blueprint(
 
 @reports_bp.get("/excel")
 @jwt_required
-@roles_required(ROLE_ADMIN, ROLE_TEACHER)
+@roles_required(ROLE_TEACHER)
 def sessions_excel():
     """
     Genera el Excel general de sesiones.

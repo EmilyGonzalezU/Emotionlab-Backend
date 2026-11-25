@@ -463,6 +463,48 @@ class SessionService:
         return None
 
 
+    def get_session_owner(
+        self,
+        session_id: str,
+    ) -> Optional[dict[str, str]]:
+        """Return only the persisted owner metadata for an authorization check.
+
+        Report review needs to confirm the requester's current ownership, but
+        the administrator must not load or receive the session payload. The
+        session-id GSI projects all attributes; this query explicitly asks
+        DynamoDB for only the owner field.
+        """
+        if not session_id:
+            return None
+
+        try:
+            matches = self.dynamo.query_all(
+                self.table,
+                Key("session_id").eq(str(session_id)),
+                index_name="gsi-sessions-sessionid",
+                max_items=1,
+                projection_expression="owner_id",
+            )
+            if matches:
+                owner_id = matches[0].get("owner_id")
+                return {"owner_id": owner_id} if owner_id else None
+        except Exception as error:
+            print(
+                "Error buscando propietario de sesión "
+                f"(tipo={type(error).__name__})"
+            )
+
+        # Compatibility with the separately configured legacy source. The
+        # result returned to callers remains an owner-only projection.
+        if self.legacy_data_service:
+            for session in self._list_legacy_sessions():
+                if session.get("session_id") == session_id:
+                    owner_id = session.get("owner_id")
+                    return {"owner_id": owner_id} if owner_id else None
+
+        return None
+
+
     def get_session_by_session_id(
         self,
         session_id: str,
@@ -927,6 +969,7 @@ class SessionService:
         date_from: Optional[str] = None,
         date_to: Optional[str] = None,
         status: Optional[str] = None,
+        include_raw_json: bool = True,
     ) -> list[dict]:
 
         if status is not None:
@@ -938,6 +981,7 @@ class SessionService:
             status,
             date_from,
             date_to,
+            bool(include_raw_json),
         )
 
         cached = SESSION_CACHE.get(
@@ -999,7 +1043,7 @@ class SessionService:
 
         filtered = [
 
-            self._materialize_raw_json(s)
+            (self._materialize_raw_json(s) if include_raw_json else s)
             or s
 
             for s in items
@@ -1298,6 +1342,8 @@ class SessionService:
     def list_sessions_by_date(
         self,
         fecha: str,
+        *,
+        include_raw_json: bool = True,
     ) -> list[dict]:
 
         self._validate_date(fecha)
@@ -1305,6 +1351,7 @@ class SessionService:
         cache_key = (
             "sessions_by_date",
             fecha,
+            bool(include_raw_json),
         )
 
         cached = SESSION_CACHE.get(
@@ -1339,22 +1386,19 @@ class SessionService:
             for session in exact_match:
 
                 combined[
-                    self._session_unique_key(
-                        session
-                    )
+                    self._session_unique_key(session)
                 ] = (
-                    self._materialize_raw_json(
-                        session
-                    )
-                    or session
-                )
+                    self._materialize_raw_json(session)
+                    if include_raw_json
+                    else session
+                ) or session
 
         except Exception:
 
             exact_match = []
 
         # Compatibilidad
-        for session in self.list_sessions():
+        for session in self.list_sessions(include_raw_json=include_raw_json):
 
             if (
                 self._get_date(session)
@@ -3424,7 +3468,12 @@ class SessionService:
 
         return self.dynamo.get_item(self.table, key)
 
-    def release_capture_slot(self, session_id: str) -> bool:
+    def release_capture_slot(
+        self,
+        session_id: str,
+        *,
+        owner_id: Optional[str] = None,
+    ) -> bool:
         """Libera el cerrojo global SOLO si pertenece a `session_id`.
 
         El borrado es condicional (`active_session_id = :expected`): si otra
@@ -3437,6 +3486,14 @@ class SessionService:
 
             return False
 
+        names = {"#active": "active_session_id"}
+        values = {":expected": session_id}
+        condition = "attribute_exists(#active) AND #active = :expected"
+        if isinstance(owner_id, str) and owner_id.strip():
+            condition += " AND #owner = :owner"
+            names["#owner"] = "owner_id"
+            values[":owner"] = owner_id.strip()
+
         released = self.dynamo.delete_item(
 
             self.table,
@@ -3446,23 +3503,78 @@ class SessionService:
                 "sk": self._capture_lock_sk(),
             },
 
-            condition_expression=(
-                "attribute_exists(#active) AND #active = :expected"
-            ),
-
-            expression_attribute_names={
-                "#active": "active_session_id",
-            },
-
-            expression_attribute_values={
-                ":expected": session_id,
-            },
+            condition_expression=condition,
+            expression_attribute_names=names,
+            expression_attribute_values=values,
         )
 
         if released:
 
             invalidate_sessions_cache()
 
+        return bool(released)
+
+    def has_open_capture_experiences(self) -> bool:
+        """Fail closed if any persisted capture is not in its terminal state."""
+        open_statuses = {
+            STATUS_CAPTURING,
+            STATUS_FINALIZING,
+            STATUS_IMPORTING,
+            STATUS_CAPTURE_IMPORT_ERROR,
+        }
+        # This scan is only used when an orphaned lock has no session ID. Do
+        # not use the cached list_sessions() result: failure to verify must
+        # prevent lock recovery, never be treated as an empty table.
+        sessions = self.dynamo.scan_all(self.table)
+        return any(
+            item.get("pk_type") == PK_TYPE_SESSION
+            and (item.get("status") or item.get("estado")) in open_statuses
+            for item in sessions
+        )
+
+    def release_empty_capture_slot(self, owner_id: str) -> bool:
+        """Conditionally remove an orphan lock only when it has no attempt data.
+
+        The owner guard and absence checks ensure this cannot release a lock
+        for another owner or an in-flight/uncertain remote confirmation.
+        This removes only the technical lock row, never a session row.
+        """
+        if not isinstance(owner_id, str) or not owner_id.strip():
+            return False
+
+        names = {
+            "#kind": "pk_type",
+            "#owner": "owner_id",
+            "#active": "active_session_id",
+            "#state": "confirmation_state",
+            "#token": "capture_token",
+            "#lens": "lens_session_id",
+            "#lens_participant": "lens_participant_id",
+        }
+        values = {
+            ":kind": PK_TYPE_CAPTURE_LOCK,
+            ":owner": owner_id.strip(),
+        }
+        condition = (
+            "#kind = :kind AND #owner = :owner "
+            "AND attribute_not_exists(#active) "
+            "AND attribute_not_exists(#state) "
+            "AND attribute_not_exists(#token) "
+            "AND attribute_not_exists(#lens) "
+            "AND attribute_not_exists(#lens_participant)"
+        )
+        released = self.dynamo.delete_item(
+            self.table,
+            {
+                "participant_id": PENDING_PARTICIPANT_ID,
+                "sk": self._capture_lock_sk(),
+            },
+            condition_expression=condition,
+            expression_attribute_names=names,
+            expression_attribute_values=values,
+        )
+        if released:
+            invalidate_sessions_cache()
         return bool(released)
 
     def mark_capture_confirmation_unknown(self, session_id: str) -> bool:

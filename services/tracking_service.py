@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, Mapping, Optional
 
 from boto3.dynamodb.conditions import Key
@@ -25,7 +27,7 @@ from services.emotion_classification import (
     clasificacion_original,
     etapas_bienestar,
 )
-from services.emotion_model_v2_service import ESTADO_ANALIZADO
+from services.emotion_model_v2_contract import ESTADO_ANALIZADO
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +51,20 @@ class TrackingService:
 
     TRACKINGS_ID_INDEX = "gsi-trackings-id"
     SESSIONS_TRACKING_INDEX = "gsi-sessions-tracking"
+    V8_EMOTIONAL_VARIABLES = (
+        ("estado_emocional", "PRE", "estado_pre"),
+        ("nerviosismo", "PRE", "nerviosismo_pre"),
+        ("preocupacion", "PRE", "preocupacion_pre"),
+        ("preparacion", "PRE", "preparacion_pre"),
+        ("estado_emocional", "FACIL", "estado_facil"),
+        ("nerviosismo", "FACIL", "nerviosismo_facil"),
+        ("satisfaccion", "FACIL", "satisfaccion_facil"),
+        ("alivio", "FACIL", "alivio_facil"),
+        ("estado_emocional", "DIFICIL", "estado_dificil"),
+        ("nerviosismo", "DIFICIL", "nerviosismo_dificil"),
+        ("satisfaccion", "DIFICIL", "satisfaccion_dificil"),
+        ("alivio", "DIFICIL", "alivio_dificil"),
+    )
 
     def __init__(
         self,
@@ -223,12 +239,8 @@ class TrackingService:
         return [item for item in sessions if str(item.get("owner_id") or "") == actor_uid]
 
     @staticmethod
-    def _ensure_v2_processed(session: Mapping[str, Any]) -> None:
-        """Exige que la sesión tenga un procesamiento V2 finalizado.
-
-        Un seguimiento solo agrupa sesiones ya analizadas por EmotionLab V2;
-        de lo contrario la evolución de bienestar tendría huecos.
-        """
+    def _ensure_analyzed(session: Mapping[str, Any]) -> None:
+        """Exige un análisis completado sin depender de una versión del modelo."""
 
         procesamiento = session.get("model_processing")
 
@@ -237,7 +249,7 @@ class TrackingService:
             or procesamiento.get("status") != ESTADO_ANALIZADO
         ):
             raise ValueError(
-                "La sesión no tiene un procesamiento V2 finalizado correctamente."
+                "La sesión no tiene un análisis finalizado correctamente."
             )
 
     @staticmethod
@@ -251,6 +263,45 @@ class TrackingService:
             return f"{fecha} {hora}"
 
         return fecha
+
+    @classmethod
+    def _v8_original_emotional_observations(
+        cls,
+        processing: Any,
+    ) -> list[dict[str, Any]]:
+        """Return valid, observed V8 answers without phase aggregation/imputation."""
+        if not isinstance(processing, Mapping) or not (
+            processing.get("model_version") == "1.0.0-experimental"
+            and processing.get("algorithm") == "KMeans"
+            and processing.get("n_clusters") == 2
+        ):
+            return []
+        originals = processing.get("variables_originales")
+        if not isinstance(originals, Mapping):
+            return []
+        raw_estimated = processing.get("estimadas")
+        estimated = (
+            {name for name in raw_estimated if isinstance(name, str)}
+            if isinstance(raw_estimated, (list, tuple, set))
+            else set()
+        )
+        observed = []
+        for dimension, phase, name in cls.V8_EMOTIONAL_VARIABLES:
+            if name in estimated:
+                continue
+            value = originals.get(name)
+            if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
+                continue
+            numeric = float(value)
+            if math.isfinite(numeric) and numeric.is_integer() and 1 <= numeric <= 9:
+                observed.append({
+                    "dimension": dimension,
+                    "phase": phase,
+                    "variable": name,
+                    "value": int(numeric),
+                    "type": "observed",
+                })
+        return observed
 
     def _audit_event(
         self,
@@ -316,6 +367,15 @@ class TrackingService:
         # cada experiencia únicamente por su ``session_id``.
         summary["classification_final"] = clasificacion_binaria(processing)
         summary["classification_original"] = clasificacion_original(processing)
+        if (
+            isinstance(processing, Mapping)
+            and processing.get("model_version") == "1.0.0-experimental"
+        ):
+            summary["kmeans_group"] = processing.get("grupo")
+            summary["centroid_relative_index"] = processing.get(
+                "indice_relativo_centroides"
+            )
+            summary["tension_index"] = processing.get("tension_index")
         summary["indicador_inicial"] = etapas.get("inicial")
         summary["indicador_facil"] = etapas.get("facil")
         summary["indicador_dificil"] = etapas.get("dificil")
@@ -411,7 +471,7 @@ class TrackingService:
             )
 
         self._require_session_owner(session, actor_ctx)
-        self._ensure_v2_processed(session)
+        self._ensure_analyzed(session)
 
         if session.get("tracking_id"):
             raise ValueError(
@@ -552,10 +612,16 @@ class TrackingService:
         )
         sessions = self._sessions_for_actor(sessions, actor_ctx)
 
-        result = [
-            self._session_summary(session)
-            for session in sessions
-        ]
+        por_sesion: dict[str, Mapping[str, Any]] = {}
+        for session in sessions:
+            session_id = str(session.get("session_id") or "").strip()
+            if not session_id:
+                continue
+            previous = por_sesion.get(session_id)
+            if previous is None or str(session.get("updated_at") or "") >= str(previous.get("updated_at") or ""):
+                por_sesion[session_id] = session
+
+        result = [self._session_summary(session) for session in por_sesion.values()]
 
         return sorted(
             result,
@@ -658,7 +724,12 @@ class TrackingService:
             if not session_id:
                 continue
 
-            por_sesion[str(session_id)] = session
+            key = str(session_id)
+            previous = por_sesion.get(key)
+            if previous is None or str(session.get("updated_at") or "") >= str(
+                previous.get("updated_at") or ""
+            ):
+                por_sesion[key] = session
 
         # Orden CRONOLÓGICO (ascendente): del más antiguo al más reciente.
         ordenadas = sorted(
@@ -673,22 +744,47 @@ class TrackingService:
         puntos = []
 
         for indice, session in enumerate(ordenadas, start=1):
-            puntos.append(
-                {
-                    "session_number": indice,
-                    "session_id": session.get("session_id"),
-                    "session_date": self._session_date(session),
-                    "wellbeing": bienestar_promedio(
-                        session.get("model_processing")
-                    ),
-                }
-            )
+            processing = session.get("model_processing")
+            point = {
+                "session_number": indice,
+                "session_id": session.get("session_id"),
+                "session_date": self._session_date(session),
+                "difficulty": session.get("difficulty"),
+                "wellbeing": bienestar_promedio(processing),
+            }
+            if isinstance(processing, Mapping):
+                point["model_version"] = processing.get("model_version")
+            if (
+                isinstance(processing, Mapping)
+                and processing.get("model_version") == "1.0.0-experimental"
+            ):
+                point["observations"] = self._v8_original_emotional_observations(
+                    processing
+                )
+                point["kmeans_group"] = processing.get("grupo")
+                point["centroid_relative_index"] = processing.get(
+                    "indice_relativo_centroides"
+                )
+                point["tension_index"] = processing.get("tension_index")
+            puntos.append(point)
 
-        return {
+        response = {
             "tracking_id": tracking.get("tracking_id"),
             "total_sessions": len(puntos),
             "sessions": puntos,
         }
+        if any(
+            point.get("model_version") == "1.0.0-experimental"
+            for point in puntos
+        ):
+            response["prediction"] = {
+                "status": "unavailable",
+                "reason": "stable_participant_identity_unavailable",
+                "method": None,
+                "observations_used": 0,
+                "interval": None,
+            }
+        return response
 
     # ==========================================================
     # SESIONES DISPONIBLES
@@ -698,7 +794,7 @@ class TrackingService:
         self,
         actor_ctx: Optional[Mapping[str, Any]] = None,
     ) -> list[dict]:
-        sessions = self.sessions.list_sessions()
+        sessions = self.sessions.list_sessions(include_raw_json=False)
         available = []
         sessions = self._sessions_for_actor(sessions, actor_ctx)
 
@@ -753,7 +849,7 @@ class TrackingService:
                 "No se encontró la sesión seleccionada."
             )
 
-        self._ensure_v2_processed(session)
+        self._ensure_analyzed(session)
         self._require_session_owner(session, actor_ctx)
 
         if session.get("tracking_id"):
@@ -878,7 +974,7 @@ class TrackingService:
                 )
 
             self._require_session_owner(session, actor_ctx)
-            self._ensure_v2_processed(session)
+            self._ensure_analyzed(session)
 
             actual = session.get("tracking_id")
 

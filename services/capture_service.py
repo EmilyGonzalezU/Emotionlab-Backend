@@ -61,14 +61,12 @@ from core.constants import (
     AUDIT_CAPTURE_RECORD_REJECTED,
     AUDIT_CAPTURE_STARTED,
 )
-from services.emotion_classification import enriquecer_analisis
-from services.emotion_model_v2_service import (
-    ESTADO_ANALIZADO,
-    MODEL_VERSION_ESPERADA,
-    EmotionModelV2Service,
-)
+from services.emotion_model_v8_contract import MODEL_VERSION
 from services.import_service import ImportService
-from services.parsers.emotion_v2_parser import EmotionV2Parser
+from services.response_scale_normalization import (
+    annotate_unity_record,
+    prepare_v8_input,
+)
 from services.lens_session_service import (
     LensApiConfirmationAmbiguous,
     LensSessionExpired,
@@ -324,6 +322,17 @@ class CaptureService:
         )
         digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         return f"hash:{digest}"
+
+    @staticmethod
+    def _record_sha256(record: Mapping[str, Any]) -> str:
+        canonical = json.dumps(
+            record,
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     # ------------------------------------------------------------------
     # FECHAS
@@ -664,7 +673,7 @@ class CaptureService:
                                 failure_code=failure_code,
                             )
                     finally:
-                        self.session.release_capture_slot(session_id)
+                        self.session.release_capture_slot(session_id, owner_id=owner_id)
                     self._audit(
                         AUDIT_CAPTURE_PIN_REJECTED,
                         actor_ctx,
@@ -676,7 +685,7 @@ class CaptureService:
                         "El código no corresponde a una sesión vigente del lente."
                     ) from error
                 except Exception:
-                    self.session.release_capture_slot(session_id)
+                    self.session.release_capture_slot(session_id, owner_id=owner_id)
                     raise
 
                 lens_session_id = (
@@ -690,7 +699,7 @@ class CaptureService:
                     else None
                 )
                 if not lens_session_id:
-                    self.session.release_capture_slot(session_id)
+                    self.session.release_capture_slot(session_id, owner_id=owner_id)
                     raise InvalidDisplayCode(
                         "El código no corresponde a una sesión vigente del lente."
                     )
@@ -727,7 +736,7 @@ class CaptureService:
                 lens_participant_id = str(lens_participant_id)
 
             if not lens_session_id:
-                self.session.release_capture_slot(session_id)
+                self.session.release_capture_slot(session_id, owner_id=owner_id)
                 raise InvalidDisplayCode(
                     "El código no corresponde a una sesión vigente del lente."
                 )
@@ -746,7 +755,7 @@ class CaptureService:
             # La confirmación externa ya pudo consumirse. Se conserva el
             # resultado confirmado en el slot para reanudar con el mismo token.
             if not (code and self.session.get_capture_confirmation(session_id)):
-                self.session.release_capture_slot(session_id)
+                self.session.release_capture_slot(session_id, owner_id=owner_id)
             raise
 
         session = result["session"]
@@ -857,9 +866,22 @@ class CaptureService:
             return slot.get("confirmation_state") != CAPTURE_CONFIRMATION_IN_PROGRESS
 
         if self._slot_is_stale(slot):
-            # Se libera comprobando el valor leído: si otro proceso ya
-            # reemplazó el cerrojo, este borrado no lo elimina.
-            self.session.release_capture_slot(slot.get("active_session_id"))
+            active_session_id = slot.get("active_session_id")
+            if active_session_id:
+                # Elimina únicamente el intento leído y del mismo propietario.
+                released = self.session.release_capture_slot(
+                    active_session_id,
+                    owner_id=owner_id,
+                )
+            else:
+                # El registro perdió su ID de sesión. No se puede inferir ni
+                # finalizar una sesión; solo se limpia si no quedan capturas
+                # abiertas y el lock vacío pertenece al actor actual.
+                if self.session.has_open_capture_experiences():
+                    return False
+                released = self.session.release_empty_capture_slot(owner_id)
+            if not released:
+                return False
             return bool(
                 self.session.acquire_capture_slot(
                     session_id, owner_id, capture_token
@@ -1070,6 +1092,8 @@ class CaptureService:
                 # Identificadores originales y datos íntegros de Unity.
                 "record": record,
             }
+            _normalized_record, normalization = annotate_unity_record(record)
+            stored["response_normalization"] = normalization
 
             stored_records.append(stored)
             known_identities.add(identity)
@@ -1320,7 +1344,10 @@ class CaptureService:
             )
             self.session.update_session_fields(session_id, fields)
             if changed:
-                self.session.release_capture_slot(session_id)
+                self.session.release_capture_slot(
+                    session_id,
+                    owner_id=session.get("owner_id"),
+                )
                 self._audit(
                     AUDIT_CAPTURE_IMPORTED,
                     actor_ctx,
@@ -1682,6 +1709,7 @@ class CaptureService:
                     "captured_at": self._captured_at_for(record, content),
                     "received_at": self._now(),
                     "record": content.get("record", content),
+                    **self._normalization_fields(content.get("record", content)),
                 }
             )
             known_identities.add(identity)
@@ -1924,14 +1952,7 @@ class CaptureService:
         raw = refreshed.get("raw_json") or {}
         stored_records = list(raw.get("records") or [])
 
-        merged: dict[str, Any] = {}
-
-        for item in stored_records:
-            if not isinstance(item, Mapping):
-                continue
-            inner = item.get("record")
-            if isinstance(inner, Mapping):
-                merged = ImportService._merge_session_records(merged, inner)
+        merged, model_input, normalization = self._merge_capture_records(stored_records)
 
         fields: dict[str, Any] = {}
 
@@ -1939,10 +1960,88 @@ class CaptureService:
             fields["processing_status"] = "modelo_v2_no_configurado"
             return fields
 
-        fields.update(self._analyze_v2(session_id, merged, refreshed))
+        fields.update(
+            self._analyze_v2(
+                session_id,
+                merged,
+                refreshed,
+                model_input=model_input,
+                normalization=normalization,
+            )
+        )
         fields["processing_status"] = fields.get("ai_status")
 
         return fields
+
+    @staticmethod
+    def _normalization_fields(record: Any) -> dict[str, Any]:
+        if not isinstance(record, Mapping):
+            return {}
+        _normalized_record, normalization = annotate_unity_record(record)
+        return {
+            "response_normalization": normalization,
+        }
+
+    @staticmethod
+    def _merge_capture_records(
+        stored_records: list[Mapping[str, Any]],
+    ) -> tuple[dict[str, Any], dict[str, Any], Optional[dict[str, Any]]]:
+        """Build raw and V8-only merged inputs from centrally stored records.
+
+        Legacy/historical entries have no normalization marker, so their raw
+        record remains the V8 input. New ingested entries carry a versioned,
+        separate normalized copy.
+        """
+        raw_merged: dict[str, Any] = {}
+        model_merged: dict[str, Any] = {}
+        normalization_records: list[dict[str, Any]] = []
+        versions: set[str] = set()
+
+        for record_index, item in enumerate(stored_records):
+            if not isinstance(item, Mapping):
+                continue
+            raw_record = item.get("record")
+            if not isinstance(raw_record, Mapping):
+                continue
+            raw_merged = ImportService._merge_session_records(raw_merged, raw_record)
+
+            metadata = item.get("response_normalization")
+            version = metadata.get("version") if isinstance(metadata, Mapping) else None
+            if isinstance(version, str) and version:
+                versions.add(version)
+                model_record = prepare_v8_input(raw_record, metadata)
+                record_report = dict(metadata)
+                normalization_records.append(
+                    {
+                        "record_index": record_index,
+                        "unity_session_id": item.get("unity_session_id"),
+                        "identity": item.get("identity"),
+                        **record_report,
+                    }
+                )
+            else:
+                model_record = raw_record
+            model_merged = ImportService._merge_session_records(model_merged, model_record)
+
+        if not versions:
+            return raw_merged, model_merged, None
+
+        status = "normalized"
+        if any(
+            entry.get("status") not in {"normalized", "no_mapped_answers"}
+            for entry in normalization_records
+        ) or any(
+            answer.get("status") not in {"normalized", "already_normalized"}
+            for entry in normalization_records
+            for answer in entry.get("answers", [])
+        ):
+            status = "partial"
+        version = next(iter(versions)) if len(versions) == 1 else "mixed"
+        return raw_merged, model_merged, {
+            "version": version,
+            "status": status,
+            "records": normalization_records,
+        }
 
     def _analyze_v2(
         self,
@@ -1951,6 +2050,8 @@ class CaptureService:
         session: Mapping[str, Any],
         *,
         force: bool = False,
+        model_input: Optional[Mapping[str, Any]] = None,
+        normalization: Optional[Mapping[str, Any]] = None,
     ) -> dict[str, Any]:
         """Ejecuta el análisis V2 sobre el registro fusionado de la sesión.
 
@@ -1959,40 +2060,59 @@ class CaptureService:
         Con `force=True` se ignora la reutilización y se recalcula.
         """
 
-        v2_parser = EmotionV2Parser(merged)
-        student_data = v2_parser.get_student_data()
-        valores = v2_parser.get_model_values()
-        extraccion = v2_parser.get_extraction_report()
+        data = merged.get("session_data")
+        data = data if isinstance(data, Mapping) else merged
+        student_data = {
+            "edad": data.get("edad"),
+            "genero": data.get("genero"),
+            "participant_id": data.get("idParticipante"),
+            "fecha_inicio": data.get("fechaInicio"),
+            "fecha_fin": data.get("fechaFin"),
+            "difficulty_level": data.get("difficulty_level"),
+        }
 
         existente = session.get("model_processing") or {}
+        normalization_version = (normalization or {}).get("version")
 
         if (
             not force
             and isinstance(existente, Mapping)
-            and existente.get("model_version") == MODEL_VERSION_ESPERADA
-            and existente.get("status") == ESTADO_ANALIZADO
-            and existente.get("measured_values") == valores
+            and existente.get("model_version") == MODEL_VERSION
+            and existente.get("status") in {"analyzed", "insufficient_data"}
+            and existente.get("variables_originales") is not None
+            and existente.get("source_record_sha256") == self._record_sha256(merged)
+            and (existente.get("response_normalization") or {}).get("version")
+            == normalization_version
         ):
             return {
                 "model_processing": existente,
-                "ai_status": ESTADO_ANALIZADO,
+                "ai_status": existente.get("status"),
                 "ai_reused": True,
                 "student_data": student_data,
             }
 
         try:
-            analisis = self.emotion_v2.analyze(session_id, valores)
+            analisis = self.emotion_v2.analyze(
+                session_id,
+                model_input if model_input is not None else merged,
+            )
         except Exception as error:
-            analisis = EmotionModelV2Service.error_block(error)
-            analisis["session_id"] = session_id
-            analisis["measured_values"] = valores
+            error_builder = getattr(self.emotion_v2, "error_block", None)
+            if callable(error_builder):
+                try:
+                    analisis = error_builder(error, session_id)
+                except TypeError:
+                    # Older injected engines expose error_block(error) only.
+                    analisis = error_builder(error)
+            else:
+                from services.emotion_model_v8_service import build_v8_error_block
 
-        analisis["extraction"] = extraccion
+                analisis = build_v8_error_block(error, session_id)
 
-        # Enmascaramiento binario + bienestar promedio (post-predicción).
-        # Conserva `prediction.group` (original) y agrega la clasificación
-        # final binaria y el promedio de los tres indicadores.
-        enriquecer_analisis(analisis)
+        if normalization is not None:
+            analisis["response_normalization"] = dict(normalization)
+
+        analisis["source_record_sha256"] = self._record_sha256(merged)
 
         return {
             "model_processing": analisis,
@@ -2027,18 +2147,18 @@ class CaptureService:
                 "La experiencia no tiene registros de Unity importados."
             )
 
-        merged: dict[str, Any] = {}
-
-        for item in stored_records:
-            if not isinstance(item, Mapping):
-                continue
-            inner = item.get("record")
-            if isinstance(inner, Mapping):
-                merged = ImportService._merge_session_records(merged, inner)
+        merged, model_input, normalization = self._merge_capture_records(stored_records)
 
         previous = session.get("model_processing") or {}
 
-        fields = self._analyze_v2(session_id, merged, session, force=force)
+        fields = self._analyze_v2(
+            session_id,
+            merged,
+            session,
+            force=force,
+            model_input=model_input,
+            normalization=normalization,
+        )
 
         block = fields.get("model_processing")
 
@@ -2142,7 +2262,18 @@ class CaptureService:
 
         raw = session.get("raw_json") or {}
 
-        return list(raw.get("records") or [])
+        # The API continues to expose Unity's original record wrappers only;
+        # the backend's versioned normalization audit stays in model_processing.
+        return [
+            {
+                key: value
+                for key, value in item.items()
+                if key != "response_normalization"
+            }
+            if isinstance(item, Mapping)
+            else item
+            for item in (raw.get("records") or [])
+        ]
 
     def _experience_view(
         self,

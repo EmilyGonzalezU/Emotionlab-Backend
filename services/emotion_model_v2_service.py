@@ -34,33 +34,30 @@ from typing import Any, Mapping, Optional, Sequence
 
 import pandas as pd
 
-
-# ==========================================================
-# CONTRATO CONGELADO (no modificar)
-# ==========================================================
-
-VARIABLES_MODELO: tuple[str, ...] = (
-    "inicial_nerviosismo",
-    "inicial_sentir_hoy",
-    "facil_nerviosismo_cierre",
-    "facil_sentir_hoy_cierre",
-    "dificil_nerviosismo_cierre",
-    "dificil_sentir_hoy_cierre",
+from services.emotion_model_v2_contract import (
+    ESTADO_ANALIZADO,
+    ESTADO_DATOS_INSUFICIENTES,
+    ESTADO_ERROR,
+    ETAPAS,
+    MODEL_VERSION_ESPERADA,
+    N_GRUPOS,
+    SHA256_ESPERADO,
+    VARIABLES_MODELO,
+    ModelV2ConfigError,
+    ModelV2Error,
+    build_error_block,
 )
 
-MODEL_VERSION_ESPERADA = "0.1.0-experimental"
 
-SHA256_ESPERADO = (
-    "6a2dd607599e7f860098f58049aff6151a7c1be9f2c6ed924a1a2224b14fdd1d"
-)
+# ==========================================================
+# CONTRATO CONGELADO (constantes y excepciones compartidas)
+# ==========================================================
 
 # Medianas históricas de la versión congelada, en el orden de VARIABLES_MODELO.
 # Se validan contra ``statistics_`` del artefacto; no son una segunda fuente.
 MEDIANAS_ESPERADAS: tuple[float, ...] = (3.0, 2.0, 2.0, 1.0, 3.0, 2.0)
 
 ESCALA_ENTRADA: tuple[int, int] = (1, 9)
-
-N_GRUPOS = 3
 
 PASOS_PIPELINE: tuple[str, ...] = ("imputacion", "escalado", "agrupamiento")
 
@@ -70,11 +67,6 @@ PESO_ESTADO_ESPERADO = 0.3
 # Correspondencia semántica definida por el proyecto (ver especificación §3):
 #   facil   -> medición PRE del estudiante (NO el modo fácil de Unity)
 #   dificil -> medición de la etapa DIFÍCIL
-ETAPAS: dict[str, tuple[str, str]] = {
-    "inicial": ("inicial_nerviosismo", "inicial_sentir_hoy"),
-    "facil": ("facil_nerviosismo_cierre", "facil_sentir_hoy_cierre"),
-    "dificil": ("dificil_nerviosismo_cierre", "dificil_sentir_hoy_cierre"),
-}
 
 ETIQUETAS_ETAPA: dict[str, str] = {
     "inicial": "INICIAL",
@@ -85,9 +77,6 @@ ETIQUETAS_ETAPA: dict[str, str] = {
 # Estados del análisis de IA (separados del estado de captura).
 ESTADO_PENDIENTE = "pending"
 ESTADO_EN_PROCESO = "processing"
-ESTADO_ANALIZADO = "analyzed"
-ESTADO_DATOS_INSUFICIENTES = "insufficient_data"
-ESTADO_ERROR = "processing_error"
 
 _SHA_RE = re.compile(r"[0-9a-f]{64}")
 _ENTERO_RE = re.compile(r"[0-9]+")
@@ -98,16 +87,8 @@ _ENTERO_RE = re.compile(r"[0-9]+")
 # ==========================================================
 
 
-class ModelV2Error(RuntimeError):
-    """Error genérico del motor V2."""
-
-
 class ModelV2IntegrityError(ModelV2Error):
     """El artefacto no coincide con su SHA-256 esperado."""
-
-
-class ModelV2ConfigError(ModelV2Error):
-    """La configuración o el Pipeline no cumplen el contrato congelado."""
 
 
 class ModelV2EnvironmentError(ModelV2Error):
@@ -709,21 +690,4 @@ class EmotionModelV2Service:
     def error_block(error: Exception) -> dict[str, Any]:
         """Bloque homogéneo de error del análisis, sin datos sensibles."""
 
-        return {
-            "session_id": None,
-            "model_version": MODEL_VERSION_ESPERADA,
-            "algorithm": "K-Means",
-            "n_clusters": N_GRUPOS,
-            "artifact_sha256": SHA256_ESPERADO,
-            "original_values": None,
-            "imputed_values": None,
-            "imputed_fields": [],
-            "applied_medians": {},
-            "inference_input": None,
-            "derived_indicators": None,
-            "prediction": {"group": None, "n_clusters": N_GRUPOS},
-            "inference_at": None,
-            "status": ESTADO_ERROR,
-            "approved_production": False,
-            "error": f"{type(error).__name__}: {error}"[:500],
-        }
+        return build_error_block(error)

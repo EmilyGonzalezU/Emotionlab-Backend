@@ -1,10 +1,8 @@
 """Consultas agregadas para el dashboard de EmotionLab.
 
-El único modelo de IA vigente es V2 (K-Means). Los indicadores derivados de la
-predicción V1 (``bienestar`` / ``probabilidad`` / ``confianza``) ya no se
-generan: las consultas exponen el estado del análisis V2 (``model_processing``)
-y la distribución por clasificación binaria final (``0`` / ``1``), resultado
-de enmascarar el grupo K-Means original (``2 -> 1``).
+EmotionLab V8 reports original K-Means group IDs (0 or 1). Historical records
+may still use the legacy V2 helper; V8 groups are returned directly and are
+never converted to binary outcome labels.
 """
 
 from collections import Counter
@@ -13,7 +11,7 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 from services.emotion_classification import clasificacion_binaria
-from services.emotion_model_v2_service import ESTADO_ANALIZADO
+from services.emotion_model_v2_contract import ESTADO_ANALIZADO
 from services.session_service import (
     STATUS_COMPLETED,
     STATUS_IMPORT_ERROR,
@@ -94,13 +92,7 @@ class DashboardService:
     def get_sessions_by_date(
         self, *, date_from: Optional[str] = None, date_to: Optional[str] = None, owner_id: Optional[str] = None
     ) -> list[dict]:
-        """Serie para graficos: total y distribucion por clasificacion binaria.
-
-        La clasificacion expuesta es la FINAL enmascarada (0 o 1): el grupo
-        original del K-Means (0/1/2) se transforma con ``2 -> 1``. Se conserva
-        la clave ``grupo_2`` por compatibilidad de contrato, pero siempre vale
-        0 porque la clasificacion final nunca es 2.
-        """
+        """Serie por fecha y grupo K-Means, conservando los IDs V8."""
         sessions = self._filtered_sessions(date_from, date_to, None, None, owner_id=owner_id)
         groups: dict[str, Counter] = {}
         for session in sessions:
@@ -132,7 +124,11 @@ class DashboardService:
         difficulty: Optional[str],
         owner_id: Optional[str] = None,
     ) -> list[dict]:
-        sessions = self.session_service.list_sessions(date_from=date_from, date_to=date_to)
+        sessions = self.session_service.list_sessions(
+            date_from=date_from,
+            date_to=date_to,
+            include_raw_json=False,
+        )
         filtered = []
         for session in sessions:
             if (genero is not None and session.get("genero") != genero) or (
@@ -160,5 +156,9 @@ class DashboardService:
 
     @classmethod
     def _group(cls, session: dict) -> Optional[int]:
-        """Clasificacion binaria final (0/1) del analisis V2 de la sesion."""
-        return clasificacion_binaria(cls._model_processing(session))
+        """Return a V8 cluster ID without relabeling it as a binary outcome."""
+        processing = cls._model_processing(session)
+        if processing.get("model_version") == "1.0.0-experimental":
+            group = processing.get("grupo")
+            return group if type(group) is int and group in (0, 1) else None
+        return clasificacion_binaria(processing)
