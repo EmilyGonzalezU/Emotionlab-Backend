@@ -80,6 +80,18 @@ variable "tags" {
   default     = {}
 }
 
+variable "point_in_time_recovery_enabled" {
+  description = "Activa recuperación a un punto en el tiempo para proteger datos de la tabla."
+  type        = bool
+  default     = true
+}
+
+variable "ttl_attribute_name" {
+  description = "Atributo numérico Unix utilizado para expiración TTL"
+  type        = string
+  default     = null
+}
+
 locals {
 
   # ============================================================
@@ -244,7 +256,7 @@ locals {
   # Esto evita errores como:
   #
   #   nombre
-  #   pred_bienestar
+  #   model_processing
   #   hora
   #   edad
   #
@@ -437,7 +449,7 @@ resource "aws_dynamodb_table" "table" {
       # Aquí SÍ pueden aparecer atributos normales como:
       #
       # nombre
-      # pred_bienestar
+      # model_processing
       # fecha
       # hora
       # edad
@@ -480,7 +492,16 @@ resource "aws_dynamodb_table" "table" {
   # ============================================================
 
   point_in_time_recovery {
-    enabled = false
+    enabled = var.point_in_time_recovery_enabled
+  }
+
+  dynamic "ttl" {
+    for_each = var.ttl_attribute_name != null ? [var.ttl_attribute_name] : []
+
+    content {
+      attribute_name = ttl.value
+      enabled        = true
+    }
   }
 
   # ============================================================

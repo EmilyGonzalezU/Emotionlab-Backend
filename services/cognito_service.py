@@ -11,7 +11,6 @@ Gestiona:
 from __future__ import annotations
 
 import os
-import logging
 from typing import Any, Mapping, Optional
 
 import boto3
@@ -25,9 +24,6 @@ from core.exceptions import (
     InvalidCredentials,
     UserNotFound,
 )
-
-
-logger = logging.getLogger(__name__)
 
 
 class CognitoService:
@@ -100,6 +96,9 @@ class CognitoService:
         except jose_jwt.JWTError as err:
             raise AuthenticationError("Token invalido o corrupto") from err
 
+        if unverified_header.get("alg") != "RS256":
+            raise AuthenticationError("Cognito solo admite tokens firmados con RS256")
+
         kid = unverified_header.get("kid")
         if not kid:
             raise AuthenticationError("Token no contiene kid")
@@ -113,10 +112,9 @@ class CognitoService:
             claims = jose_jwt.decode(
                 token,
                 public_key,
-                algorithms=[unverified_header.get("alg", "RS256")],
-                audience=self.app_client_id,
+                algorithms=["RS256"],
                 issuer=issuer,
-                options={"verify_at_hash": False},
+                options={"verify_at_hash": False, "verify_aud": False},
             )
         except jose_jwt.ExpiredSignatureError:
             raise AuthenticationError("Token expirado")
@@ -125,6 +123,21 @@ class CognitoService:
 
         if token_use and claims.get("token_use") != token_use:
             raise AuthenticationError(f"Token use no es {token_use}")
+
+        # Cognito ID tokens carry the app client in ``aud``; access tokens
+        # carry it in ``client_id`` and normally have no ``aud`` claim.
+        # Validate the appropriate claim explicitly after signature/issuer/
+        # expiry validation, rather than rejecting every access token.
+        actual_token_use = claims.get("token_use")
+        if actual_token_use == "id":
+            client_matches = claims.get("aud") == self.app_client_id
+        elif actual_token_use == "access":
+            client_matches = claims.get("client_id") == self.app_client_id
+        else:
+            raise AuthenticationError("Token Cognito debe ser de tipo access o id")
+
+        if not client_matches:
+            raise AuthenticationError("Token Cognito no pertenece al App Client configurado")
 
         return claims
 
@@ -173,7 +186,6 @@ class CognitoService:
             user_attributes.append({"Name": "custom:legacy_uid", "Value": legacy_uid})
 
         username = email.lower()
-        logger.info("[COGNITO] Creating user with email=%s", username)
         try:
             resp = self.idp.admin_create_user(
                 UserPoolId=self.user_pool_id,
@@ -186,11 +198,6 @@ class CognitoService:
 
         user = resp.get("User", {})
         attributes = {a["Name"]: a["Value"] for a in user.get("Attributes", [])}
-        logger.info(
-            "[COGNITO] AdminCreateUser completed email=%s status=%s",
-            username,
-            user.get("UserStatus"),
-        )
         return {
             "cognito_username": user.get("Username"),
             "uid": attributes.get("sub", user.get("Username")),
@@ -371,7 +378,7 @@ class CognitoService:
                 },
             )
         except self.idp.exceptions.InvalidPasswordException as err:
-            raise ValueError(f"Contrasena no cumple los requisitos: {err}") from err
+            raise ValueError("La nueva contrasena no cumple los requisitos configurados.") from err
         except self.idp.exceptions.ExpiredCodeException as err:
             raise AuthenticationError("Sesion expirada; vuelve a iniciar sesion") from err
 
@@ -427,7 +434,7 @@ class CognitoService:
             )
         except self.idp.exceptions.InvalidPasswordException as err:
             raise ValueError(
-                f"La nueva contrasena no cumple los requisitos de Cognito: {err}"
+                "La nueva contrasena no cumple los requisitos configurados."
             ) from err
         except self.idp.exceptions.ExpiredCodeException as err:
             raise AuthenticationError(
@@ -500,7 +507,7 @@ class CognitoService:
         except self.idp.exceptions.ExpiredCodeException as err:
             raise ValueError("Codigo expirado; solicita uno nuevo") from err
         except self.idp.exceptions.InvalidPasswordException as err:
-            raise ValueError(f"Contrasena no cumple los requisitos: {err}") from err
+            raise ValueError("La nueva contrasena no cumple los requisitos configurados.") from err
         except self.idp.exceptions.UserNotFoundException as err:
             raise ValueError("Usuario no encontrado") from err
 
@@ -526,4 +533,4 @@ class CognitoService:
         except self.idp.exceptions.NotAuthorizedException as err:
             raise InvalidCredentials("Contrasena actual incorrecta o token invalido") from err
         except self.idp.exceptions.InvalidPasswordException as err:
-            raise ValueError(f"Contrasena no cumple los requisitos: {err}") from err
+            raise ValueError("La nueva contrasena no cumple los requisitos configurados.") from err

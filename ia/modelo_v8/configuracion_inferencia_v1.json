@@ -1,0 +1,98 @@
+{
+    "proyecto": "EmotionLab",
+    "version_configuracion": "5.0.0-experimental-no-repetidas",
+    "variables": [
+        "estado_pre",
+        "nerviosismo_pre",
+        "preocupacion_pre",
+        "preparacion_pre",
+        "estado_facil",
+        "nerviosismo_facil",
+        "satisfaccion_facil",
+        "alivio_facil",
+        "estado_dificil",
+        "nerviosismo_dificil",
+        "satisfaccion_dificil",
+        "alivio_dificil"
+    ],
+    "escala": {
+        "minimo": 1,
+        "maximo": 9,
+        "respuestas_originales_enteras": true
+    },
+    "fases": {
+        "inicial": [
+            "estado_pre",
+            "nerviosismo_pre",
+            "preocupacion_pre",
+            "preparacion_pre"
+        ],
+        "facil": [
+            "estado_facil",
+            "nerviosismo_facil",
+            "satisfaccion_facil",
+            "alivio_facil"
+        ],
+        "dificil": [
+            "estado_dificil",
+            "nerviosismo_dificil",
+            "satisfaccion_dificil",
+            "alivio_dificil"
+        ]
+    },
+    "indicadores": {
+        "nerviosismo": [
+            "nerviosismo_pre",
+            "nerviosismo_facil",
+            "nerviosismo_dificil"
+        ],
+        "estado_emocional": [
+            "estado_pre",
+            "estado_facil",
+            "estado_dificil"
+        ],
+        "satisfaccion": [
+            "satisfaccion_facil",
+            "satisfaccion_dificil"
+        ],
+        "alivio": [
+            "alivio_facil",
+            "alivio_dificil"
+        ],
+        "preocupacion": [
+            "preocupacion_pre"
+        ],
+        "preparacion": [
+            "preparacion_pre"
+        ]
+    },
+    "criterios_minimos": {
+        "respuestas_observadas": 1,
+        "fases_observadas": 1,
+        "requiere_todas_variables_estimables": true
+    },
+    "numero_caracteristicas_obligatorias": 12,
+    "imputacion": {
+        "metodo": "mediana_personal_solo_indicador_con_observaciones",
+        "prioridad": [
+            "mediana_personal_mismo_indicador"
+        ],
+        "variables_no_repetidas": [
+            "preocupacion_pre",
+            "preparacion_pre"
+        ],
+        "sin_respuesta_equivalente": "sin datos suficientes",
+        "usar_solo_valores_originales_del_mismo_estudiante": true,
+        "usar_mediana_de_otros_estudiantes": false,
+        "usar_mediana_global_personal": false,
+        "conservar_respuestas_originales": true,
+        "redondear_imputadas": false,
+        "sin_respuestas": "informacion_insuficiente"
+    },
+    "estados": {
+        "completo": "calculado_sin_estimacion",
+        "imputado": "calculado_con_estimacion",
+        "insuficiente": "informacion_insuficiente",
+        "sin_datos_suficientes": "sin_datos_suficientes"
+    }
+}

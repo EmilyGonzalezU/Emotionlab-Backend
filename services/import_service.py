@@ -9,12 +9,10 @@ from typing import (
     cast,
 )
 
-from services.prediction_service import PredictionService
 from services.session_parser import SessionParser
 from services.session_service import (
     STATUS_IMPORT_ERROR,
     STATUS_PENDING_IDENTIFICATION,
-    STATUS_PENDING_PREDICTION,
     SessionService,
 )
 
@@ -25,6 +23,17 @@ BatchInput = Union[
     Mapping[str, Any],
     Sequence[Mapping[str, Any]],
 ]
+
+
+def public_import_summary(result: Mapping[str, Any]) -> dict[str, int]:
+    """Summarize global ingestion without returning session identifiers."""
+    return {
+        "importadas": len(result.get("pending_identification") or []),
+        "agregadas": len(result.get("aggregated") or []),
+        "errores": len(result.get("import_errors") or []),
+        "omitidas_existentes": len(result.get("skipped_existing") or []),
+        "total": int(result.get("total") or 0),
+    }
 
 
 class ImportService:
@@ -39,35 +48,30 @@ class ImportService:
             ↓
         SessionParser
             ↓
-        Modelo IA
-            ↓
         SessionService
             ↓
         DynamoDB
+
+    El único modelo de IA vigente es V2 (K-Means congelado). La inferencia
+    NO se ejecuta durante la importación: este servicio conserva las
+    funcionalidades genéricas de ingesta y persistencia (JSON íntegro,
+    metadatos normalizados y deduplicación por `session_id`).
 
     Las sesiones que todavía no tienen un participante EmotionLab
     asignado quedan en STATUS_PENDING_IDENTIFICATION.
 
     IMPORTANTE:
-    La importación desde AWS NO reintenta automáticamente las
-    sesiones que ya existen y están en STATUS_PENDING_PREDICTION.
-
-    Los reintentos de predicción deben ejecutarse mediante un
-    proceso independiente.
+    La importación desde AWS NO ejecuta el modelo sobre registros
+    históricos. El análisis V2 se realiza en el ciclo de captura
+    (`CaptureService`) o mediante un reprocesamiento expresamente
+    solicitado.
     """
 
     def __init__(
         self,
         session_service: Optional[SessionService] = None,
-        predictor=None,
-        prediction_service: Optional[PredictionService] = None,
     ):
         self.session_service = session_service or SessionService()
-
-        self.prediction_service = (
-            prediction_service
-            or PredictionService(predictor)
-        )
 
     # =========================================================
     # IMPORTACIÓN PRINCIPAL
@@ -82,17 +86,14 @@ class ImportService:
         1. Extrae y valida las sesiones.
         2. Comprueba cuáles ya existen.
         3. Procesa únicamente las nuevas.
-        4. Ejecuta el modelo IA cuando existen suficientes datos.
-        5. Guarda el resultado en DynamoDB.
-        6. Deja la sesión pendiente de identificación de participante
-           cuando corresponde.
+        4. Guarda el JSON íntegro y los metadatos normalizados.
+        5. Deja la sesión pendiente de identificación de participante.
 
         IMPORTANTE:
 
-        Las sesiones que ya existen en DynamoDB se omiten.
-
-        Esto evita que cada importación desde AWS vuelva a ejecutar
-        predicciones sobre sesiones antiguas que están pendientes.
+        Las sesiones que ya existen en DynamoDB se omiten, y las que
+        llegan como un conjunto nuevo de datos de una experiencia ya
+        conocida se agregan a la MISMA sesión.
         """
 
         sessions = self._extract_sessions(payload)
@@ -100,12 +101,10 @@ class ImportService:
         result = {
             "total": len(sessions),
             "new": [],
-            "predicted": [],
             "pending_identification": [],
-            "pending_prediction": [],
             "import_errors": [],
             "skipped_existing": [],
-            "retried_pending": [],
+            "aggregated": [],
         }
 
         # -----------------------------------------------------
@@ -148,31 +147,37 @@ class ImportService:
             # 1. Buscar por s3_key
             # -------------------------------------------------
 
-            existing = None
+            existing_by_source = None
 
             if source_key:
-                existing = existing_by_source_key.get(
+                existing_by_source = existing_by_source_key.get(
                     str(source_key)
                 )
 
             # -------------------------------------------------
-            # 2. Si no existe, buscar por session_id
+            # 2. Buscar por session_id
             # -------------------------------------------------
 
-            if existing is None and unity_session_id:
-                existing = existing_by_session_id.get(
+            existing_by_session = None
+
+            if unity_session_id:
+                existing_by_session = existing_by_session_id.get(
                     unity_session_id
                 )
 
             # -------------------------------------------------
-            # 3. SESIÓN YA EXISTENTE
+            # 3a. MISMO ARCHIVO FUENTE
+            #
+            # El mismo `s3_key` ya fue importado: es un duplicado
+            # real y no aporta información nueva. Se conserva el
+            # comportamiento previo de omitirlo.
             # -------------------------------------------------
 
-            if existing:
+            if existing_by_source:
 
                 session_id = (
-                    existing.get("session_id")
-                    or existing.get("id")
+                    existing_by_source.get("session_id")
+                    or existing_by_source.get("id")
                     or unity_session_id
                 )
 
@@ -181,18 +186,46 @@ class ImportService:
                         record
                     )
 
-                # -------------------------------------------------
-                # IMPORTANTE:
-                #
-                # No reintentamos automáticamente predicciones
-                # pendientes.
-                #
-                # Esto evita que el botón "Traer sesiones de AWS"
-                # vuelva a procesar decenas de sesiones antiguas.
-                # -------------------------------------------------
-
                 result["skipped_existing"].append(
                     session_id
+                )
+
+                continue
+
+            # -------------------------------------------------
+            # 3b. MISMO session_id, DISTINTO CONJUNTO DE DATOS
+            #
+            # La experiencia ya existe pero llega un conjunto de
+            # datos nuevo (otra captura de la MISMA sesión del
+            # lente). Se agrega a la sesión original; nunca se crea
+            # una segunda sesión EmotionLab.
+            # -------------------------------------------------
+
+            if existing_by_session:
+
+                session_id = (
+                    existing_by_session.get("session_id")
+                    or existing_by_session.get("id")
+                    or unity_session_id
+                )
+
+                if not session_id:
+                    session_id = self._session_id(
+                        record
+                    )
+
+                self._aggregate_into_session(
+                    session_id,
+                    record,
+                    source_key,
+                    result,
+                )
+
+                _track_saved(
+                    session_id,
+                    source_key,
+                    existing_by_session.get("status")
+                    or STATUS_PENDING_IDENTIFICATION,
                 )
 
                 continue
@@ -209,87 +242,26 @@ class ImportService:
                 session_id
             )
 
-            parser = None
-
             try:
 
-                # ---------------------------------------------
-                # Crear parser
-                # ---------------------------------------------
-
-                parser = SessionParser(
+                summary = SessionParser(
                     record
-                )
-
-                prediction_status = (
-                    parser.get_prediction_status()
-                )
+                ).get_dashboard_summary()
 
                 # ---------------------------------------------
-                # 5. Datos insuficientes para IA
-                # ---------------------------------------------
-
-                if not prediction_status[
-                    "can_predict"
-                ]:
-
-                    self._create_pending_prediction(
-                        session_id,
-                        record,
-                        result,
-                        parser,
-                        prediction_status,
-                    )
-
-                    _track_saved(
-                        session_id,
-                        source_key,
-                        STATUS_PENDING_PREDICTION,
-                    )
-
-                    continue
-
-                # ---------------------------------------------
-                # 6. Obtener features
-                # ---------------------------------------------
-
-                features = (
-                    parser.get_prediction_features()
-                )
-
-                # ---------------------------------------------
-                # 7. Ejecutar modelo IA
-                # ---------------------------------------------
-
-                prediction = self._predict(
-                    features
-                )
-
-                # ---------------------------------------------
-                # 8. Obtener información para dashboard
-                # ---------------------------------------------
-
-                summary = (
-                    parser.get_dashboard_summary()
-                )
-
-                # ---------------------------------------------
-                # 9. Guardar sesión
+                # 5. Guardar sesión
                 #
                 # IMPORTANTE:
                 #
                 # No utilizamos idParticipante de Unity como
-                # participant_id de EmotionLab.
-                #
-                # La sesión queda pendiente de identificación
-                # hasta que el especialista seleccione el
-                # participante correcto.
+                # participant_id de EmotionLab. La sesión queda
+                # pendiente de identificación hasta que el
+                # especialista seleccione el participante.
                 # ---------------------------------------------
 
                 self.session_service.create_session(
                     session_id,
                     record,
-                    prediction=prediction,
                     status=STATUS_PENDING_IDENTIFICATION,
                     fecha=summary.get(
                         "fecha"
@@ -310,6 +282,9 @@ class ImportService:
                         "duracion_estimada",
                         False,
                     ),
+                    duracion=summary.get(
+                        "duracion"
+                    ),
                     source_key=source_key,
                 )
 
@@ -325,32 +300,8 @@ class ImportService:
                     session_id
                 )
 
-                result[
-                    "predicted"
-                ].append(
-                    session_id
-                )
-
             # -------------------------------------------------
-            # Error controlado de datos
-            # -------------------------------------------------
-
-            except ValueError as error:
-
-                self._create_pending_prediction(
-                    session_id,
-                    record,
-                    result,
-                    parser,
-                    {
-                        "can_predict": False,
-                        "missing_fields": [],
-                        "reason": str(error),
-                    },
-                )
-
-            # -------------------------------------------------
-            # Error inesperado
+            # Error de importación
             # -------------------------------------------------
 
             except Exception as error:
@@ -363,16 +314,8 @@ class ImportService:
                     "ERROR IMPORTANDO SESIÓN"
                 )
                 print(
-                    "session_id:",
-                    session_id,
-                )
-                print(
-                    "s3_key:",
-                    source_key,
-                )
-                print(
-                    "ERROR:",
-                    error,
+                    "Error interno de importación "
+                    f"(tipo={type(error).__name__})",
                 )
                 print(
                     "=============================="
@@ -391,9 +334,8 @@ class ImportService:
                 except Exception as save_error:
 
                     print(
-                        "ERROR GUARDANDO SESIÓN "
-                        "CON ERROR:",
-                        save_error,
+                        "Error guardando sesión de importación "
+                        f"(tipo={type(save_error).__name__})"
                     )
 
                 result[
@@ -405,268 +347,200 @@ class ImportService:
         return result
 
     # =========================================================
-    # REINTENTAR PREDICCIÓN
+    # AGREGAR CONJUNTO DE DATOS A UNA EXPERIENCIA EXISTENTE
     # =========================================================
 
-    def _retry_prediction(
+    # Listas de `session_data` que representan conjuntos de datos
+    # acumulables dentro de la MISMA experiencia.
+    DATA_SET_KEYS = (
+        "respuestas",
+        "eventos",
+        "actividades",
+    )
+
+    @staticmethod
+    def _is_blank(value: Any) -> bool:
+        return (
+            value is None
+            or value == ""
+            or value == []
+            or value == {}
+        )
+
+    @staticmethod
+    def _merge_session_records(
+        base: Optional[Mapping[str, Any]],
+        extra: Mapping[str, Any],
+    ) -> dict:
+        """
+        Combina dos conjuntos de datos de la MISMA experiencia.
+
+        La identidad la determina quien invoca (el `session_id` original);
+        esta función solo acumula el contenido según el contrato de la
+        fuente: las listas `respuestas`, `eventos` y `actividades` se
+        concatenan y el resto de los campos conserva el primer valor no
+        vacío. No se infieren relaciones por tiempo, orden de llegada ni
+        similitud de contenido.
+        """
+
+        merged: dict[str, Any] = (
+            dict(base) if isinstance(base, Mapping) else {}
+        )
+
+        incoming: dict[str, Any] = (
+            dict(extra) if isinstance(extra, Mapping) else {}
+        )
+
+        base_data = merged.get("session_data")
+        base_data = (
+            dict(base_data)
+            if isinstance(base_data, Mapping)
+            else {}
+        )
+
+        new_data = incoming.get("session_data")
+        new_data = (
+            dict(new_data)
+            if isinstance(new_data, Mapping)
+            else {}
+        )
+
+        merged_data = dict(base_data)
+
+        for key, value in new_data.items():
+
+            if (
+                key in ImportService.DATA_SET_KEYS
+                and isinstance(value, list)
+            ):
+
+                current = merged_data.get(key)
+
+                merged_data[key] = (
+                    list(current)
+                    if isinstance(current, list)
+                    else []
+                ) + list(value)
+
+            elif ImportService._is_blank(
+                merged_data.get(key)
+            ):
+
+                merged_data[key] = value
+
+        merged["session_data"] = merged_data
+
+        for key, value in incoming.items():
+
+            if key == "session_data":
+                continue
+
+            if ImportService._is_blank(
+                merged.get(key)
+            ):
+
+                merged[key] = value
+
+        return merged
+
+    def _aggregate_into_session(
         self,
         session_id: str,
         record: Mapping[str, Any],
-    ) -> str:
+        source_key: Optional[str],
+        result: dict,
+    ) -> None:
         """
-        Reintenta la predicción de una sesión que quedó
-        pendiente.
+        Incorpora un conjunto de datos adicional a una experiencia ya
+        importada, sin crear una segunda sesión.
 
-        NOTA:
-
-        Esta función se conserva para utilizarla mediante
-        un proceso independiente de reintento.
-
-        NO se ejecuta automáticamente durante import_batch().
+        La experiencia conserva su `session_id` original: el nuevo
+        conjunto se fusiona con el `raw_json` almacenado. La inferencia
+        NO se recalcula aquí: el análisis V2 se gestiona en el ciclo de
+        captura o en un reprocesamiento solicitado.
         """
+
+        existing = None
+
+        try:
+            existing = self.session_service.get_session(
+                session_id
+            )
+
+        except Exception as error:
+
+            print(
+                "Error recuperando la experiencia "
+                "para agregar datos "
+                f"(tipo={type(error).__name__})"
+            )
+
+        if not existing:
+            # No se pudo confirmar la sesión existente: no se altera
+            # ninguna identidad y el registro se reporta como existente.
+            result["skipped_existing"].append(
+                session_id
+            )
+
+            return
+
+        merged_record = self._merge_session_records(
+            existing.get("raw_json"),
+            record,
+        )
+
+        fields: dict[str, Any] = {}
 
         try:
 
-            parser = SessionParser(
-                record
-            )
+            summary = SessionParser(
+                merged_record
+            ).get_dashboard_summary()
 
-            prediction_status = (
-                parser.get_prediction_status()
-            )
-
-            # ---------------------------------------------
-            # Todavía faltan datos
-            # ---------------------------------------------
-
-            if not prediction_status[
-                "can_predict"
-            ]:
-
-                self.session_service.update_document_if_supported(
-                    session_id,
-                    {
-                        "prediction_error": (
-                            prediction_status[
-                                "reason"
-                            ]
-                        ),
-                        "prediction_missing_fields": (
-                            prediction_status[
-                                "missing_fields"
-                            ]
-                        ),
-                    },
-                )
-
-                return "pending"
-
-            # ---------------------------------------------
-            # Obtener features
-            # ---------------------------------------------
-
-            features = (
-                parser.get_prediction_features()
-            )
-
-            # ---------------------------------------------
-            # Ejecutar IA
-            # ---------------------------------------------
-
-            prediction = self._predict(
-                features
-            )
-
-            # ---------------------------------------------
-            # Información dashboard
-            # ---------------------------------------------
-
-            summary = (
-                parser.get_dashboard_summary()
-            )
-
-            # ---------------------------------------------
-            # Guardar predicción
-            # ---------------------------------------------
-
-            self.session_service.update_prediction(
-                session_id,
-                prediction,
-            )
-
-            self.session_service.update_session_fields(
-                session_id,
+            fields.update(
                 {
-                    "fecha": summary.get(
-                        "fecha"
-                    ),
-                    "hora": summary.get(
-                        "hora"
-                    ),
-                    "edad": summary.get(
-                        "edad"
-                    ),
-                    "genero": summary.get(
-                        "genero"
-                    ),
-                    "difficulty": summary.get(
-                        "difficulty"
-                    ),
+                    "fecha": summary.get("fecha"),
+                    "hora": summary.get("hora"),
+                    "edad": summary.get("edad"),
+                    "genero": summary.get("genero"),
+                    "difficulty": summary.get("difficulty"),
                     "duracion_estimada": summary.get(
                         "duracion_estimada",
                         False,
                     ),
-                    "prediction_error": None,
-                    "prediction_missing_fields": [],
-                },
+                    "duracion": summary.get("duracion"),
+                }
             )
-
-            return "predicted"
 
         except Exception as error:
 
             print(
-                f"Error reintentando predicción "
-                f"{session_id}: {error}"
+                "Error recalculando la experiencia agregada "
+                f"(tipo={type(error).__name__})"
             )
-
-            return "error"
-
-    # =========================================================
-    # CREAR SESIÓN PENDIENTE DE PREDICCIÓN
-    # =========================================================
-
-    def _create_pending_prediction(
-        self,
-        session_id: str,
-        record: Mapping[str, Any],
-        result: dict,
-        parser: Optional[SessionParser] = None,
-        prediction_status: Optional[dict] = None,
-    ) -> None:
-        """
-        Guarda una sesión cuando todavía no existen suficientes
-        datos para ejecutar el modelo IA.
-        """
 
         try:
 
-            active_parser = (
-                parser
-                or SessionParser(record)
-            )
-
-            summary = (
-                active_parser.get_dashboard_summary()
-            )
-
-            if prediction_status is None:
-
-                prediction_status = (
-                    active_parser.get_prediction_status()
-                )
-
-            # ---------------------------------------------
-            # Crear sesión pendiente
-            # ---------------------------------------------
-
-            self.session_service.create_session(
+            self.session_service.merge_session_data_set(
                 session_id,
-                record,
-                status=STATUS_PENDING_PREDICTION,
-                fecha=summary.get(
-                    "fecha"
-                ),
-                hora=summary.get(
-                    "hora"
-                ),
-                edad=summary.get(
-                    "edad"
-                ),
-                genero=summary.get(
-                    "genero"
-                ),
-                difficulty=summary.get(
-                    "difficulty"
-                ),
-                duracion_estimada=summary.get(
-                    "duracion_estimada",
-                    False,
-                ),
-                source_key=record.get(
-                    "s3_key"
-                ),
+                merged_record,
+                fields=fields,
             )
 
-            # ---------------------------------------------
-            # Guardar información faltante
-            # ---------------------------------------------
-
-            self.session_service.update_prediction_pending_info(
-                session_id,
-                prediction_status.get(
-                    "missing_fields",
-                    [],
-                ),
-            )
-
-            result[
-                "pending_prediction"
-            ].append(
+            result["aggregated"].append(
                 session_id
             )
 
         except Exception as error:
 
             print(
-                f"Error creando sesión pendiente: "
-                f"{error}"
+                "Error guardando la experiencia agregada "
+                f"(tipo={type(error).__name__})"
             )
 
-            # ---------------------------------------------
-            # Intentar registrar el error de importación
-            # ---------------------------------------------
-
-            try:
-
-                self.session_service.create_session(
-                    session_id,
-                    record,
-                    status=STATUS_IMPORT_ERROR,
-                    source_key=record.get(
-                        "s3_key"
-                    ),
-                )
-
-            except Exception as save_error:
-
-                print(
-                    "Error guardando estado "
-                    "de importación:",
-                    save_error,
-                )
-
-            result[
-                "import_errors"
-            ].append(
+            result["import_errors"].append(
                 session_id
             )
-
-    # =========================================================
-    # PREDICCIÓN
-    # =========================================================
-
-    def _predict(
-        self,
-        features: dict,
-    ) -> dict:
-        """
-        Ejecuta el servicio de predicción.
-        """
-
-        return self.prediction_service.predict(
-            features
-        )
 
     # =========================================================
     # AWS

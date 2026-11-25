@@ -1,0 +1,75 @@
+﻿name: Deploy EmotionLab V8 Images
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  AWS_ACCOUNT_ID: "595859497127"
+  BACKEND_REPOSITORY: emotionlab-backend-v8
+  MODEL_REPOSITORY: emotionlab-model-v8
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Create ECR repositories if missing
+        shell: bash
+        run: |
+          for repo in "$BACKEND_REPOSITORY" "$MODEL_REPOSITORY"; do
+            if ! aws ecr describe-repositories \
+              --repository-names "$repo" \
+              --region "$AWS_REGION" >/dev/null 2>&1; then
+              aws ecr create-repository \
+                --repository-name "$repo" \
+                --image-tag-mutability IMMUTABLE \
+                --image-scanning-configuration scanOnPush=true \
+                --region "$AWS_REGION"
+            fi
+          done
+
+      - name: Set image tags
+        shell: bash
+        run: |
+          echo "IMAGE_TAG=${GITHUB_SHA}" >> "$GITHUB_ENV"
+          echo "ECR_REGISTRY=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push Backend V8
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infrastructure/deploy/backend_v8/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.ECR_REGISTRY }}/${{ env.BACKEND_REPOSITORY }}:${{ env.IMAGE_TAG }}
+
+      - name: Build and push Model V8
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infrastructure/deploy/model_v8_lambda/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.ECR_REGISTRY }}/${{ env.MODEL_REPOSITORY }}:${{ env.IMAGE_TAG }}

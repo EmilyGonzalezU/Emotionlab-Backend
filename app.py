@@ -2,10 +2,32 @@ import inspect
 import logging
 import os
 import sys
-import traceback
 from pathlib import Path
 
-from dotenv import load_dotenv
+# A direct `python app.py` launch should use the frozen V8 runtime when the
+# repository's local Micromamba environment exists. Keep imports below this
+# bootstrap so a system Python with incompatible scientific packages never
+# initializes the application.
+if __name__ == "__main__":
+    _repo_root = Path(__file__).resolve().parent
+    _runtime_candidates = (
+        _repo_root / ".venv-v8" / "python.exe",
+        _repo_root / ".venv-v8" / "Scripts" / "python.exe",
+        _repo_root / ".venv-v8" / "bin" / "python",
+    )
+    _v8_python = next((path for path in _runtime_candidates if path.is_file()), None)
+    if _v8_python is not None and _v8_python.resolve() != Path(sys.executable).resolve():
+        os.execv(
+            str(_v8_python),
+            [str(_v8_python), str(Path(__file__).resolve()), *sys.argv[1:]],
+        )
+    if sys.version_info[:3] != (3, 13, 18):
+        raise SystemExit(
+            "EmotionLab V8 requiere Python 3.13.18. Instala el entorno .venv-v8 "
+            "o ejecútalo con ese intérprete."
+        )
+
+from dotenv import dotenv_values, load_dotenv
 from flask import Flask, jsonify
 from flask_cors import CORS
 
@@ -28,6 +50,7 @@ def _load_environment():
     # Directorio donde está app.py en desarrollo
     base_dir = Path(__file__).resolve().parent
     development_env = base_dir / ".env"
+    selected_env = development_env
 
     # Cuando estamos ejecutando el EXE generado por PyInstaller
     if getattr(sys, "frozen", False):
@@ -38,21 +61,38 @@ def _load_environment():
         packaged_env = executable_dir.parent / "config" / ".env"
 
         if packaged_env.exists():
-            load_dotenv(
-                dotenv_path=packaged_env,
-                override=False,
-            )
-            return
+            selected_env = packaged_env
 
     # Ejecución normal desde el proyecto
-    if development_env.exists():
-        load_dotenv(
-            dotenv_path=development_env,
-            override=False,
-        )
+    if selected_env.exists():
+        configured_bucket = (dotenv_values(selected_env).get("S3_REPORT_PDFS_BUCKET") or "").strip()
+        inherited_bucket_raw = os.getenv("S3_REPORT_PDFS_BUCKET")
+        inherited_bucket = os.getenv("S3_REPORT_PDFS_BUCKET", "").strip()
+        if inherited_bucket_raw is not None and inherited_bucket != configured_bucket:
+            logging.warning(
+                "S3_REPORT_PDFS_BUCKET del entorno de lanzamiento sobrescribe el valor de %s. "
+                "Bucket efectivo del entorno: %s",
+                selected_env,
+                inherited_bucket or "(vacío)",
+            )
+        load_dotenv(dotenv_path=selected_env, override=False)
+        if inherited_bucket_raw is not None:
+            bucket_source = "entorno del proceso"
+        elif configured_bucket:
+            bucket_source = f"dotenv:{selected_env.resolve()}"
+        else:
+            bucket_source = "sin configuración"
     else:
-        # Fallback
+        # Fallback de dotenv conserva la prioridad del entorno del proceso.
         load_dotenv(override=False)
+        bucket_source = (
+            "entorno del proceso"
+            if os.getenv("S3_REPORT_PDFS_BUCKET") is not None
+            else "sin configuración"
+        )
+
+    # Provenance is intentionally limited to a non-secret diagnostic label.
+    os.environ["EMOTIONLAB_S3_REPORT_BUCKET_SOURCE"] = bucket_source
 
 
 # IMPORTANTE:
@@ -60,7 +100,16 @@ def _load_environment():
 # que utilizan variables de entorno.
 _load_environment()
 
+# Direct local execution means local V8 inference unless the caller explicitly
+# selected a different V8 mode in the process or .env. A legacy V2 remote mode
+# must not disable the current local V8 package.
+if __name__ == "__main__":
+    os.environ.setdefault("EMOTION_MODEL_V8_MODE", "local")
 
+
+from botocore.exceptions import ClientError
+
+from core.aws_error_logging import log_aws_client_error
 from core.exceptions import (
     AuthenticationError,
     AuthorizationError,
@@ -78,10 +127,13 @@ from routes.report_requests import report_requests_bp
 from routes.session_routes import sessions_bp
 from routes.user_routes import users_bp
 from routes.audit_routes import audit_bp
+from routes.tracking_routes import trackings_bp
+from routes.session_code_routes import session_codes_bp
+from routes.capture_routes import captures_bp
 
 
 def _cors_origen_permitido(origin):
-    permitidos = {
+    permitidos = set(filter(None, (item.strip() for item in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",")))) or {
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://localhost:4173",
@@ -133,10 +185,7 @@ def create_app(services: dict | None = None) -> Flask:
         app,
         resources={
             r"/*": {
-                "origins": [
-                    "http://localhost:5173",
-                    "http://127.0.0.1:5173",
-                ],
+                "origins": list(filter(None, (item.strip() for item in os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")))),
                 "always_send": True,
                 "methods": [
                     "GET",
@@ -155,7 +204,7 @@ def create_app(services: dict | None = None) -> Flask:
                 "max_age": 3600,
             }
         },
-        supports_credentials=True,
+        supports_credentials=False,
     )
 
     @app.get("/health")
@@ -198,6 +247,9 @@ def create_app(services: dict | None = None) -> Flask:
         dashboard_bp,
         reports_bp,
         report_requests_bp,
+        trackings_bp,
+        session_codes_bp,
+        captures_bp,
         audit_bp,
     ):
         app.register_blueprint(blueprint)
@@ -218,6 +270,42 @@ def create_app(services: dict | None = None) -> Flask:
     return app
 
 
+def _build_emotion_v8_engine():
+    """Construye el motor V8 local o su cliente remoto Lambda."""
+
+    legacy_mode = os.getenv("EMOTION_MODEL_V2_MODE", "").strip().lower()
+    mode = os.getenv("EMOTION_MODEL_V8_MODE", "").strip().lower()
+
+    if not mode:
+        if legacy_mode and legacy_mode != "local":
+            from services.emotion_model_v8_service import EmotionModelV8UnavailableService
+
+            reason = (
+                "La configuraci?n remota existente usa el contrato V2. "
+                "V8 requiere configurar expl?citamente EMOTION_MODEL_V8_MODE."
+            )
+            logging.getLogger(__name__).error(reason)
+            return EmotionModelV8UnavailableService(reason)
+        mode = "local"
+
+    if mode == "local":
+        from services.emotion_model_v8_service import EmotionModelV8Service
+        return EmotionModelV8Service()
+
+    if mode == "lambda":
+        from services.emotion_model_v8_lambda_client import EmotionModelV8LambdaClient
+        return EmotionModelV8LambdaClient()
+
+    from services.emotion_model_v8_service import EmotionModelV8UnavailableService
+
+    reason = (
+        f"EMOTION_MODEL_V8_MODE no reconocido: {mode!r}. "
+        "Valores admitidos: local, lambda."
+    )
+    logging.getLogger(__name__).error(reason)
+    return EmotionModelV8UnavailableService(reason)
+
+
 def _build_services() -> dict:
     """Construye y enlaza todos los servicios EmotionLab — ETAPA 2 AWS.
 
@@ -228,12 +316,11 @@ def _build_services() -> dict:
         4. UserService
         5. AuthService
         6. ParticipantService
-        7. PredictionService
-        8. SessionService
-        9. ReportService
-        10. ReportRequestService
-        11. DashboardService
-        12. ImportService
+        7. SessionService
+        8. ReportService
+        9. ReportRequestService
+        10. DashboardService
+        11. ImportService
     """
 
     # ==========================================================
@@ -360,12 +447,8 @@ def _build_services() -> dict:
     )
 
     # ==========================================================
-    # 7-8. PREDICTION + SESSION
+    # 7-8. SESSION
     # ==========================================================
-    from services.prediction_service import PredictionService
-
-    prediction_service = PredictionService()
-
     from services.aws_service import AWSService
 
     aws_service = AWSService()
@@ -377,6 +460,69 @@ def _build_services() -> dict:
         s3_service=s3_service,
         audit_svc=audit_service,
         legacy_data_service=aws_service,
+    )
+
+    # ==========================================================
+    # SEGUIMIENTO SEUDONIMIZADO
+    # ==========================================================
+    from services.tracking_service import TrackingService
+
+    tracking_service = (
+        TrackingService(
+            dynamodb_service=dynamodb_service,
+            session_service=session_service,
+            audit_svc=audit_service,
+        )
+        if dynamodb_service is not None
+        else None
+    )
+
+    # ==========================================================
+    # IDENTIFICACIÓN DE SESIONES DEL LENTE (displayCode)
+    # ==========================================================
+    from services.lens_session_service import LensSessionService
+
+    lens_session_service = (
+        LensSessionService(
+            dynamodb_service=dynamodb_service,
+            audit_svc=audit_service,
+            ssm_service=ssm_service,
+        )
+        if dynamodb_service is not None
+        else None
+    )
+
+    # ==========================================================
+    # INGESTIÓN DE DATOS UNITY (GET /data del API Gateway del lente)
+    # ==========================================================
+    from services.unity_data_service import UnityDataService
+
+    unity_data_service = UnityDataService()
+
+    # ==========================================================
+    # MODELO V8 CONGELADO (K-MEANS) — ÚNICO motor activo
+    # ==========================================================
+    # La instancia valida el manifiesto; la carga Joblib es perezosa y exige
+    # el runtime V8 exacto antes de abrir los artefactos.
+    emotion_v2_service = _build_emotion_v8_engine()
+
+    # ==========================================================
+    # CICLO DE CAPTURA (EXPERIENCIA DE EMOTIONLAB)
+    # ==========================================================
+    from services.capture_service import CaptureService
+
+    capture_service = (
+        CaptureService(
+            session_service=session_service,
+            lens_session_service=lens_session_service,
+            audit_svc=audit_service,
+            aws_service=aws_service,
+            s3_service=s3_service,
+            unity_data_service=unity_data_service,
+            emotion_v2_service=emotion_v2_service,
+        )
+        if dynamodb_service is not None
+        else None
     )
 
     # ==========================================================
@@ -400,6 +546,7 @@ def _build_services() -> dict:
         session_service=session_service,
         s3_service=s3_service,
         ses_service=ses_service,
+        tracking_service=tracking_service,
     )
 
     # ==========================================================
@@ -415,7 +562,6 @@ def _build_services() -> dict:
 
     import_service = ImportService(
         session_service=session_service,
-        prediction_service=prediction_service,
     )
 
     return {
@@ -442,8 +588,12 @@ def _build_services() -> dict:
 
         # SESIONES / PARTICIPANTES / IA
         "session_service": session_service,
+        "tracking_service": tracking_service,
+        "lens_session_service": lens_session_service,
+        "unity_data_service": unity_data_service,
+        "capture_service": capture_service,
         "participant_service": participant_service,
-        "prediction_service": prediction_service,
+        "emotion_v2_service": emotion_v2_service,
         "import_service": import_service,
         "dashboard_service": dashboard_service,
 
@@ -460,7 +610,7 @@ def _register_error_handlers(app: Flask) -> None:
     def authentication_error(error):
         return jsonify(
             {
-                "error": str(error)
+                "error": "Credenciales inválidas o sesión expirada."
             }
         ), 401
 
@@ -468,7 +618,7 @@ def _register_error_handlers(app: Flask) -> None:
     def authorization_error(error):
         return jsonify(
             {
-                "error": str(error)
+                "error": "No tiene permisos para esta acción."
             }
         ), 403
 
@@ -477,15 +627,15 @@ def _register_error_handlers(app: Flask) -> None:
     def not_found(error):
         return jsonify(
             {
-                "error": str(error)
+                "error": "El recurso solicitado no existe."
             }
         ), 404
 
     @app.errorhandler(ValueError)
-    def invalid_request(error):
+    def invalid_request(_error):
         return jsonify(
             {
-                "error": str(error)
+                "error": "La solicitud contiene datos no validos."
             }
         ), 400
 
@@ -507,74 +657,15 @@ def _register_error_handlers(app: Flask) -> None:
 
     @app.errorhandler(Exception)
     def unhandled_exception(error):
-
-        if os.getenv("EMOTIONLAB_LOCAL_DIAGNOSTICS") == "1":
-            from botocore.exceptions import ClientError
-
-            print(
-                "===== AUTH LOGIN ERROR =====",
-                flush=True,
+        if isinstance(error, ClientError):
+            # Diagnóstico seguro: servicio/operación/código/mensaje/request id
+            # y módulo de origen. Conserva el traceback para el log local.
+            log_aws_client_error(app.logger, error)
+        else:
+            app.logger.error(
+                "Error interno no controlado (tipo=%s)",
+                type(error).__name__,
             )
-
-            print(
-                f"Exception type: {type(error).__name__}",
-                flush=True,
-            )
-
-            if isinstance(error, ClientError):
-                aws_error = error.response.get(
-                    "Error",
-                    {}
-                )
-
-                metadata = error.response.get(
-                    "ResponseMetadata",
-                    {}
-                )
-
-                print(
-                    f"error_code: {aws_error.get('Code')}",
-                    flush=True,
-                )
-
-                print(
-                    f"http_status: {metadata.get('HTTPStatusCode')}",
-                    flush=True,
-                )
-
-                print(
-                    f"operation: {getattr(error, 'operation_name', None)}",
-                    flush=True,
-                )
-
-            else:
-                print(
-                    f"Exception message: {error}",
-                    flush=True,
-                )
-
-                print(
-                    "Traceback:",
-                    flush=True,
-                )
-
-                print(
-                    "".join(
-                        traceback.format_exception(error)
-                    ),
-                    end="",
-                    flush=True,
-                )
-
-            print(
-                "=============================",
-                flush=True,
-            )
-
-        app.logger.exception(
-            "Error no manejado: %s",
-            error,
-        )
 
         try:
             cw = app.extensions["services"].get(
@@ -584,24 +675,8 @@ def _register_error_handlers(app: Flask) -> None:
             if cw is not None:
                 cw.put_event(
                     level="ERROR",
-                    message=(
-                        f"UNHANDLED_EXCEPTION: "
-                        f"{type(error).__name__}: {error}"
-                    ),
-                    context={
-                        "path": (
-                            getattr(
-                                getattr(
-                                    error,
-                                    "__traceback__",
-                                    None,
-                                ),
-                                "tb_frame",
-                                None,
-                            )
-                            and error.__traceback__.tb_frame.f_code.co_filename
-                        )
-                    },
+                    message="UNHANDLED_EXCEPTION",
+                    context={"exception_type": type(error).__name__},
                 )
 
         except Exception:

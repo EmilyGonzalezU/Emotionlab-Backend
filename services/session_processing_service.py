@@ -1,4 +1,14 @@
-"""Procesamiento idempotente de sesiones legacy mediante el pipeline IA existente."""
+"""Procesamiento y reprocesamiento de sesiones con el modelo único V2 (K-Means).
+
+Este servicio opera sobre registros de Unity/AWS sin alterar la fuente cruda.
+Persiste el JSON íntegro y los metadatos normalizados de cada experiencia y,
+cuando el registro contiene respuestas del contrato V2, aplica el análisis
+K-Means congelado de forma ADITIVA (campo ``model_processing``).
+
+No existe ninguna ruta hacia el modelo V1: el único motor de IA vigente es V2.
+El análisis se ejecuta únicamente en procesamientos nuevos o en
+reprocesamientos expresamente solicitados.
+"""
 
 from __future__ import annotations
 
@@ -7,8 +17,12 @@ from typing import Any, Optional
 
 from botocore.exceptions import ClientError
 
+from services.emotion_model_v2_contract import (
+    ESTADO_ANALIZADO,
+    ESTADO_DATOS_INSUFICIENTES,
+)
 from services.import_service import ImportService
-from services.prediction_service import PredictionService
+from services.parsers.emotion_v8_parser import EmotionV8Parser
 from services.session_parser import SessionParser
 from services.session_service import (
     STATUS_PENDING_IDENTIFICATION,
@@ -23,10 +37,11 @@ class SessionProcessingService:
     def __init__(
         self,
         session_service: SessionService,
-        prediction_service: Optional[PredictionService] = None,
+        emotion_v2_service=None,
     ):
         self.session_service = session_service
-        self.prediction_service = prediction_service or PredictionService()
+        # Motor V2 (K-Means congelado): el único motor de IA vigente.
+        self.emotion_v2 = emotion_v2_service
 
     def inspect(self, records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         """Calcula el plan sin ejecutar el modelo ni escribir datos."""
@@ -40,16 +55,15 @@ class SessionProcessingService:
             )
             if existing_item:
                 summary["already_existing"] += 1
-                if self._has_prediction(existing_item):
+                if self._has_analysis(existing_item):
                     summary["skipped_duplicates"] += 1
                 else:
                     summary["would_update"] += 1
 
-            try:
-                SessionParser(record).get_prediction_features()
+            if self._has_model_input(record):
                 summary["features_complete"] += 1
                 summary["likely_processable"] += 1
-            except Exception:
+            else:
                 summary["insufficient_data"] += 1
 
             if not existing_item:
@@ -82,22 +96,16 @@ class SessionProcessingService:
         *,
         progress: bool = False,
     ) -> dict[str, Any]:
-        """Ejecuta parser y modelo en memoria sin tocar persistencia."""
+        """Ejecuta el análisis V2 en memoria sin tocar persistencia."""
         details: list[dict[str, Any]] = []
-        probabilities: list[float] = []
         summary = {
             "total": len(records),
             "processable": 0,
             "not_processable": 0,
-            "bienestar_si": 0,
-            "bienestar_no": 0,
+            "analyzed": 0,
+            "insufficient_data": 0,
             "errors": 0,
-            "probability_min": None,
-            "probability_max": None,
-            "probability_average": None,
-            "above_threshold": 0,
-            "below_threshold": 0,
-            "threshold": 0.5,
+            "groups": {"0": 0, "1": 0},
             "details": details,
         }
 
@@ -107,37 +115,36 @@ class SessionProcessingService:
                 print(f"Preview {index}/{len(records)}", flush=True)
             detail = {"index": index, "session_id": session_id}
             try:
-                parser = SessionParser(record)
-                features = parser.get_prediction_features()
-                prediction = self.prediction_service.predict(features)
-                probability = float(prediction["probabilidad"])
-                detail.update(
-                    {
-                        "bienestar": prediction["bienestar"],
-                        "probabilidad": probability,
-                        "confianza": float(prediction["confianza"]),
-                    }
-                )
-                probabilities.append(probability)
-                summary["processable"] += 1
-                if prediction["bienestar"] == "SI":
-                    summary["bienestar_si"] += 1
+                if self.emotion_v2 is None:
+                    detail["processing_error"] = "modelo_v2_no_configurado"
+                    summary["errors"] += 1
+                    details.append(detail)
+                    continue
+
+                analisis = self.emotion_v2.analyze(session_id, record)
+                status = analisis.get("status")
+                detail["status"] = status
+
+                if status == ESTADO_ANALIZADO:
+                    grupo = int(analisis["grupo"])
+                    detail["group"] = grupo
+                    summary["analyzed"] += 1
+                    summary["processable"] += 1
+                    summary["groups"][str(grupo)] = (
+                        summary["groups"].get(str(grupo), 0) + 1
+                    )
+                elif status == ESTADO_DATOS_INSUFICIENTES:
+                    summary["insufficient_data"] += 1
+                    summary["not_processable"] += 1
                 else:
-                    summary["bienestar_no"] += 1
-                if probability >= summary["threshold"]:
-                    summary["above_threshold"] += 1
-                else:
-                    summary["below_threshold"] += 1
+                    summary["not_processable"] += 1
+                    detail["processing_error"] = status
             except Exception as error:
                 summary["not_processable"] += 1
                 summary["errors"] += 1
                 detail["processing_error"] = f"{type(error).__name__}: {error}"
             details.append(detail)
 
-        if probabilities:
-            summary["probability_min"] = min(probabilities)
-            summary["probability_max"] = max(probabilities)
-            summary["probability_average"] = sum(probabilities) / len(probabilities)
         return summary
 
     def _process_one(
@@ -148,24 +155,46 @@ class SessionProcessingService:
     ) -> None:
         session_id = self._session_id(record)
         source_key = record.get("s3_key")
-        existing_item = existing.get(session_id) or existing.get(source_key)
 
-        if existing_item:
+        # Distinguir un duplicado real (mismo archivo fuente) de un nuevo
+        # conjunto de datos de la MISMA experiencia (`session_id`).
+        matched_by_source = bool(source_key) and source_key in existing
+
+        existing_item = existing.get(session_id)
+
+        if existing_item is None and matched_by_source:
+            existing_item = existing.get(source_key)
+
+        if existing_item is not None:
             session_id = str(existing_item.get("session_id") or session_id)
             summary["already_existing"] += 1
-            if self._has_prediction(existing_item):
+
+            if matched_by_source:
+                # El mismo archivo fuente ya fue procesado: duplicado real.
                 summary["skipped_duplicates"] += 1
                 return
 
+            # La experiencia ya existe y llega información nueva: se
+            # enriquece la MISMA sesión sin cambiar su identidad.
+            self._aggregate_existing(
+                record,
+                session_id,
+                existing_item,
+                summary,
+            )
+            return
+
         try:
             parser = SessionParser(record)
-            features = parser.get_prediction_features()
-            summary["features_complete"] += 1
-            summary["likely_processable"] += 1
-            prediction = self.prediction_service.predict(features)
             summary_data = parser.get_dashboard_summary()
+
+            if self._has_model_input(record):
+                summary["features_complete"] += 1
+                summary["likely_processable"] += 1
+            else:
+                summary["insufficient_data"] += 1
+
             fields = {
-                "prediction": prediction,
                 "status": STATUS_PENDING_IDENTIFICATION,
                 "estado": STATUS_PENDING_IDENTIFICATION,
                 "fecha": summary_data.get("fecha"),
@@ -176,8 +205,6 @@ class SessionProcessingService:
                 "duracion_estimada": summary_data.get("duracion_estimada", False),
                 "duracion": summary_data.get("duracion"),
                 "participant_id": self._participant_id(record),
-                "prediction_error": None,
-                "prediction_missing_fields": [],
             }
             self._save_result(
                 record,
@@ -188,11 +215,66 @@ class SessionProcessingService:
             )
             summary["processed_ok"] += 1
             summary["saved"] += 1
+            self._apply_v2(record, session_id)
         except Exception as error:
             reason = f"{type(error).__name__}: {error}"
             self._save_error(record, session_id, source_key, existing_item, reason)
             summary["errors"] += 1
             summary["saved"] += 1
+
+    def _aggregate_existing(
+        self,
+        record: Mapping[str, Any],
+        session_id: str,
+        existing_item: Mapping[str, Any],
+        summary: dict[str, Any],
+    ) -> None:
+        """
+        Agrega un conjunto de datos nuevo a una sesión ya persistida.
+
+        La identidad (`session_id`) no cambia. Se fusiona el `raw_json` y se
+        recalcula el análisis V2 con todos los datos disponibles.
+        """
+
+        merged_record = ImportService._merge_session_records(
+            existing_item.get("raw_json"),
+            record,
+        )
+
+        fields: dict[str, Any] = {"raw_json": merged_record}
+
+        try:
+            parser_summary = SessionParser(merged_record).get_dashboard_summary()
+            fields.update(
+                {
+                    "fecha": parser_summary.get("fecha"),
+                    "hora": parser_summary.get("hora"),
+                    "edad": parser_summary.get("edad"),
+                    "genero": parser_summary.get("genero"),
+                    "difficulty": parser_summary.get("difficulty"),
+                    "duracion_estimada": parser_summary.get(
+                        "duracion_estimada",
+                        False,
+                    ),
+                    "duracion": parser_summary.get("duracion"),
+                }
+            )
+        except Exception:
+            pass
+
+        try:
+            self.session_service.dynamo.update_item(
+                self.session_service.table,
+                {"session_id": session_id},
+                fields,
+            )
+            summary["processed_ok"] += 1
+            summary["saved"] += 1
+            self._apply_v2(merged_record, session_id)
+        except Exception as error:
+            reason = f"{type(error).__name__}: {error}"
+            self._save_error(record, session_id, record.get("s3_key"), existing_item, reason)
+            summary["errors"] += 1
 
     def _save_result(
         self,
@@ -213,7 +295,6 @@ class SessionProcessingService:
             session_id,
             record,
             source_key=source_key,
-            prediction=fields["prediction"],
             status=fields["status"],
             fecha=fields["fecha"],
             hora=fields["hora"],
@@ -235,14 +316,10 @@ class SessionProcessingService:
         existing_item: Optional[Mapping[str, Any]],
         reason: str,
     ) -> None:
-        parser = SessionParser(record)
-        status = parser.get_prediction_status()
         fields = {
-            "prediction": None,
             "status": STATUS_PROCESSING_ERROR,
             "estado": STATUS_PROCESSING_ERROR,
-            "prediction_error": reason[:500],
-            "prediction_missing_fields": status.get("missing_fields", []),
+            "processing_error": reason[:500],
         }
         if existing_item:
             self.session_service.dynamo.update_item(
@@ -251,12 +328,14 @@ class SessionProcessingService:
                 fields,
             )
             return
-        summary = parser.get_dashboard_summary()
+        try:
+            summary = SessionParser(record).get_dashboard_summary()
+        except Exception:
+            summary = {}
         self.session_service.create_session(
             session_id,
             record,
             source_key=source_key,
-            prediction=None,
             status=STATUS_PROCESSING_ERROR,
             fecha=summary.get("fecha"),
             hora=summary.get("hora"),
@@ -264,6 +343,7 @@ class SessionProcessingService:
             genero=summary.get("genero"),
             difficulty=summary.get("difficulty"),
             duracion_estimada=summary.get("duracion_estimada", False),
+            duracion=summary.get("duracion"),
             participant_id=self._participant_id(record),
             fecha_inicio=self._session_data(record).get("fechaInicio"),
             fecha_fin=self._session_data(record).get("fechaFin"),
@@ -272,9 +352,50 @@ class SessionProcessingService:
             self.session_service.table,
             {"session_id": session_id},
             {
-                "prediction": None,
-                "prediction_error": reason[:500],
-                "prediction_missing_fields": status.get("missing_fields", []),
+                "processing_error": reason[:500],
+            },
+        )
+
+    def _apply_v2(self, record: Mapping[str, Any], session_id: str) -> None:
+        """Añade el análisis V2 a la sesión ya persistida.
+
+        Es ADITIVO: nunca altera la identidad de la sesión. Un fallo del
+        motor V2 se registra como `processing_error` sin revertir lo
+        persistido ni invalidar la captura.
+        """
+
+        if self.emotion_v2 is None:
+            return
+
+        session_data = self._session_data(record)
+        student_data = {
+            "edad": session_data.get("edad"),
+            "genero": session_data.get("genero"),
+            "participant_id": session_data.get("idParticipante"),
+            "fecha_inicio": session_data.get("fechaInicio"),
+            "fecha_fin": session_data.get("fechaFin"),
+            "difficulty_level": session_data.get("difficulty_level"),
+        }
+
+        try:
+            analisis = self.emotion_v2.analyze(session_id, record)
+        except Exception as error:
+            error_builder = getattr(self.emotion_v2, "error_block", None)
+            if callable(error_builder):
+                analisis = error_builder(error, session_id)
+            else:
+                from services.emotion_model_v8_service import build_v8_error_block
+
+                analisis = build_v8_error_block(error, session_id)
+
+        self.session_service.dynamo.update_item(
+            self.session_service.table,
+            {"session_id": session_id},
+            {
+                "model_processing": analisis,
+                "ai_status": analisis.get("status"),
+                "model_version": self.emotion_v2.model_version,
+                "student_data": student_data,
             },
         )
 
@@ -320,6 +441,7 @@ class SessionProcessingService:
                 index[str(source_key)] = item
 
         return index
+
     @staticmethod
     def _session_id(record: Mapping[str, Any]) -> str:
         return ImportService._session_id(record)
@@ -330,13 +452,26 @@ class SessionProcessingService:
         return dict(data) if isinstance(data, Mapping) else {}
 
     @classmethod
+    def _has_model_input(cls, record: Mapping[str, Any]) -> bool:
+        """Indica si el registro contiene respuestas reconocidas por V8."""
+        try:
+            valores = EmotionV8Parser(record).get_model_values()
+        except Exception:
+            return False
+        return any(valor is not None for valor in valores.values())
+
+    @classmethod
     def _participant_id(cls, record: Mapping[str, Any]) -> Optional[str]:
         participant_id = cls._session_data(record).get("idParticipante")
         return str(participant_id) if participant_id else None
 
     @staticmethod
-    def _has_prediction(item: Mapping[str, Any]) -> bool:
-        return isinstance(item.get("prediction"), Mapping) and bool(item["prediction"])
+    def _has_analysis(item: Mapping[str, Any]) -> bool:
+        model_processing = item.get("model_processing")
+        return (
+            isinstance(model_processing, Mapping)
+            and model_processing.get("status") == ESTADO_ANALIZADO
+        )
 
     @staticmethod
     def _empty_summary(total: int) -> dict[str, Any]:

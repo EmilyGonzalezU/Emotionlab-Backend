@@ -99,6 +99,8 @@ class ParticipantService:
             "created_at": now,
             "updated_at": now,
         }
+        if actor_ctx and actor_ctx.get("actor_uid"):
+            data["created_by"] = str(actor_ctx["actor_uid"])
 
         try:
             created = self.dynamo.put_item(

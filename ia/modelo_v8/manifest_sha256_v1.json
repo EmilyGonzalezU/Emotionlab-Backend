@@ -1,0 +1,13 @@
+{
+    "modelo_kmeans_v1.joblib":  "6f34c5bcabc6b6b79ec208c01cd7de70aae4c0983f1a2a5eb88b0b57309b49b8",
+    "escalador_v1.joblib":  "453ec8124722ee9a8f2ce1fca7aac166141e05394cd17d7fc08b83b358c37b73",
+    "metadatos_v1.json":  "301ac9ec8e15d72922937e3a22a404467a73bb776ad68431ea25c0d27a76b1ae",
+    "configuracion_inferencia_v1.json":  "1cb2f04abbb2d9abf39e4e4a5ed3a0ba626430a9c90eeb98c8df90142aaff1ba",
+    "emotionlab_inferencia.py":  "e91269ce6a6c020dd7e96c6e4580f3b2383845d327670d650106ff008b9ba9d5",
+    "requirements-inferencia.txt":  "0cde4cd81d78c568364f102fc3f069766001f7d36205fde15baef8a506ee26d0",
+    "mapeo_unity_ml_v1.json":  "94bdea4eb39dd5815bb80760d069b7cc56668ea3075d80d31da48e45ec66440e",
+    "emotionlab_adaptador_unity.py":  "fe0716017590f7cad0a542df33e7e28a0c944571ba338446a557828c3558e9f6",
+    "emotionlab_pipeline_unity.py":  "aaf240386916fb6e80684d1bd5291e19478bd8b469df7406f632ebb2256bf099",
+    "contrato_salida_unity_v1.json":  "d7cc018b18b07a4b8ac72ef16524cd441fa3bc44d4d69ccb547f4c6ef287dd05",
+    "emotionlab_salida_json.py":  "cbf06b4bb8bad163deb16affc00db3dfa849ebe701aff2b8f267ce2633f28539"
+}

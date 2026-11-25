@@ -9,12 +9,16 @@ Utiliza presigned URLs para descargas autenticadas sin exponer el bucket.
 from __future__ import annotations
 
 import os
+import logging
 from io import BytesIO
 from typing import Any, Mapping, Optional, Union
 
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
+
+logger = logging.getLogger(__name__)
+AUTHORIZED_REPORT_PDFS_BUCKET = "emotionlab-dev-report-pdfs"
 
 class S3Service:
     """Cliente S3 para buckets privados de EmotionLab."""
@@ -30,6 +34,23 @@ class S3Service:
     def __init__(self):
         if getattr(self, "_initialized", False):
             return
+
+        self.report_bucket = os.getenv("S3_REPORT_PDFS_BUCKET", "").strip()
+        if not self.report_bucket:
+            raise RuntimeError(
+                "Falta S3_REPORT_PDFS_BUCKET. Configure el bucket de informes "
+                "PDF en el entorno de ejecución o en el archivo .env correspondiente."
+            )
+        if self.report_bucket != AUTHORIZED_REPORT_PDFS_BUCKET:
+            raise RuntimeError(
+                "Bucket de informes PDF no autorizado: "
+                f"{self.report_bucket!r}. Configure S3_REPORT_PDFS_BUCKET="
+                f"{AUTHORIZED_REPORT_PDFS_BUCKET}."
+            )
+        self.report_bucket_source = os.getenv(
+            "EMOTIONLAB_S3_REPORT_BUCKET_SOURCE",
+            "entorno del proceso (origen dotenv desconocido)",
+        )
 
         region = os.getenv(
         "AWS_REGION",
@@ -48,8 +69,14 @@ class S3Service:
 
         self._client = boto3.client("s3", **client_config)
         self._resource = boto3.resource("s3", **client_config)
-        self.report_bucket = os.getenv("S3_REPORT_PDFS_BUCKET", "").strip()
         self.sessions_raw_bucket = os.getenv("S3_SESSIONS_RAW_BUCKET", "").strip()
+
+        logger.warning(
+            "Diagnóstico S3 de informes service=%s bucket=%s config_source=%s",
+            type(self).__name__,
+            self.report_bucket,
+            self.report_bucket_source,
+        )
 
         self._initialized = True
 
@@ -58,7 +85,7 @@ class S3Service:
     # ------------------------------------------------------------------
     def require_bucket(self, bucket: str) -> None:
         if not bucket:
-            raise RuntimeError("El nombre del bucket S3 no esta configurado")
+            raise RuntimeError("El nombre del bucket S3 no está configurado")
 
     def put_object(
         self,
@@ -71,14 +98,22 @@ class S3Service:
         tags: Optional[str] = None,
     ) -> None:
         self.require_bucket(bucket)
+        report_types = {"application/pdf", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}
+        if content_type in report_types and bucket != AUTHORIZED_REPORT_PDFS_BUCKET:
+            raise RuntimeError(
+                "Se bloqueó la escritura del informe: el bucket efectivo no "
+                f"está autorizado ({bucket!r})."
+            )
         params: dict[str, Any] = {
             "Bucket": bucket,
             "Key": key,
             "Body": body.getvalue() if isinstance(body, BytesIO) else body,
-            "ServerSideEncryption": "aws:kms",
         }
         if content_type:
             params["ContentType"] = content_type
+        # The reports bucket policy requires an explicit SSE-KMS request header.
+        if content_type in report_types:
+            params["ServerSideEncryption"] = "aws:kms"
         if metadata:
             params["Metadata"] = dict(metadata)
         if tags:
@@ -103,6 +138,59 @@ class S3Service:
                 return False
             raise
 
+    def list_objects_v2(
+        self,
+        bucket: str,
+        prefix: str = "",
+        *,
+        suffix: Optional[str] = None,
+    ) -> list[dict]:
+        """Lista objetos de un prefijo con paginación completa.
+
+        Recorre TODAS las páginas mediante `ContinuationToken` (no solo la
+        primera) y devuelve, por objeto, su `key`, `last_modified`, `size`
+        y `etag`. `suffix` permite filtrar por terminación (por ejemplo
+        `.json`) sin descargar los objetos.
+
+        S3 no permite filtrar por `LastModified` en el listado: el filtro
+        temporal se aplica en el backend sobre `last_modified`.
+        """
+        self.require_bucket(bucket)
+
+        results: list[dict] = []
+        continuation: Optional[str] = None
+
+        while True:
+            params: dict[str, Any] = {"Bucket": bucket}
+            if prefix:
+                params["Prefix"] = prefix
+            if continuation:
+                params["ContinuationToken"] = continuation
+
+            response = self._client.list_objects_v2(**params)
+
+            for obj in response.get("Contents", []):
+                key = obj.get("Key", "")
+                if suffix and not str(key).lower().endswith(suffix.lower()):
+                    continue
+                results.append(
+                    {
+                        "key": key,
+                        "last_modified": obj.get("LastModified"),
+                        "size": obj.get("Size"),
+                        "etag": obj.get("ETag"),
+                    }
+                )
+
+            if not response.get("IsTruncated"):
+                break
+
+            continuation = response.get("NextContinuationToken")
+            if not continuation:
+                break
+
+        return results
+
     def delete_object(self, bucket: str, key: str) -> None:
         self.require_bucket(bucket)
         self._client.delete_object(Bucket=bucket, Key=key)
@@ -125,7 +213,11 @@ class S3Service:
             params["ResponseContentDisposition"] = (
                 f'attachment; filename="{download_filename}"'
             )
-            params["ResponseContentType"] = "application/pdf"
+            params["ResponseContentType"] = (
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                if str(download_filename or key).lower().endswith(".xlsx")
+                else "application/pdf"
+            )
         return self._client.generate_presigned_url(
             "get_object",
             Params=params,
@@ -143,11 +235,38 @@ class S3Service:
         metadata: Optional[Mapping[str, str]] = None,
     ) -> None:
         self.require_bucket(self.report_bucket)
+        if self.report_bucket != AUTHORIZED_REPORT_PDFS_BUCKET:
+            raise RuntimeError(
+                "Se bloqueó la escritura del informe: el bucket efectivo no "
+                f"está autorizado ({self.report_bucket!r})."
+            )
+        logger.warning(
+            "Diagnóstico subida PDF service=%s bucket=%s config_source=%s",
+            type(self).__name__,
+            self.report_bucket,
+            self.report_bucket_source,
+        )
         self.put_object(
             bucket=self.report_bucket,
             key=key,
             body=pdf_bytes,
             content_type="application/pdf",
+            metadata=metadata,
+        )
+
+    def put_report_excel(self, key: str, file_bytes: bytes, *, metadata: Optional[Mapping[str, str]] = None) -> None:
+        self.require_bucket(self.report_bucket)
+        if self.report_bucket != AUTHORIZED_REPORT_PDFS_BUCKET:
+            raise RuntimeError("Se bloqueó la escritura del informe: el bucket efectivo no está autorizado.")
+        logger.warning(
+            "Diagnóstico subida Excel service=%s bucket=%s config_source=%s",
+            type(self).__name__, self.report_bucket, self.report_bucket_source,
+        )
+        self.put_object(
+            bucket=self.report_bucket,
+            key=key,
+            body=file_bytes,
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             metadata=metadata,
         )
 

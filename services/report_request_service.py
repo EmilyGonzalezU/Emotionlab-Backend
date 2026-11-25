@@ -19,7 +19,10 @@ Los PDFs se almacenan en S3 privado.
 
 from __future__ import annotations
 
+import os
 import uuid
+import logging
+from datetime import datetime, timezone
 from typing import Any, Mapping, Optional
 
 from boto3.dynamodb.conditions import Attr, Key
@@ -28,13 +31,14 @@ from core.constants import (
     DYNAMODB_TABLE_REPORT_REQUESTS,
     PK_TYPE_REPORT_REQUEST,
 )
-from core.exceptions import SessionNotFound
-from core.roles import ROLE_ADMIN
+from core.roles import ROLE_ADMIN, ROLE_TEACHER
 
 from services.dynamodb_service import (
     DynamoDBService,
     dynamodb,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ==========================================================
@@ -87,6 +91,12 @@ try:
 except Exception:  # pragma: no cover
 
     SessionService = None  # type: ignore
+
+
+try:
+    from services.tracking_service import TrackingService
+except Exception:  # pragma: no cover
+    TrackingService = None  # type: ignore
 
 
 try:
@@ -154,6 +164,9 @@ class ReportRequestService:
         ses_service: Optional[
             "SESService"
         ] = None,
+        tracking_service: Optional[
+            "TrackingService"
+        ] = None,
     ):
 
         self.dynamo = (
@@ -213,6 +226,11 @@ class ReportRequestService:
             except Exception:
                 self.session_service = None
 
+        if tracking_service is not None:
+            self.tracking_service = tracking_service
+        else:
+            self.tracking_service = None
+
         # ------------------------------------------------------
         # S3
         # ------------------------------------------------------
@@ -264,6 +282,129 @@ class ReportRequestService:
             )
 
         return dict(req)
+
+    @staticmethod
+    def _notification_resource_label(req: Mapping[str, Any]) -> str:
+        if req.get("report_type") == "TRACKING":
+            return f"el seguimiento {req.get('tracking_code') or req.get('tracking_id') or ''}".strip()
+        return f"la sesion {req.get('session_id') or ''}".strip()
+
+    def _assert_session_owner(
+        self,
+        session_id: str,
+        owner_uid: str,
+        *,
+        include_session: bool = False,
+    ) -> dict:
+        """Reload a session and enforce its persisted owner.
+
+        Call this at every report lifecycle boundary; ownership copied into a
+        report-request record is not an authorization source.
+        """
+        if not session_id or not owner_uid or self.session_service is None:
+            raise PermissionError("Solicitud no disponible")
+
+        owner_lookup = getattr(
+            self.session_service,
+            "get_session_owner",
+            None,
+        )
+        if include_session or not callable(owner_lookup):
+            session_metadata = self.session_service.get_session(session_id)
+        else:
+            session_metadata = owner_lookup(session_id)
+        if not session_metadata or session_metadata.get("owner_id") != owner_uid:
+            # Same response for absent, ownerless, and foreign sessions avoids
+            # making session identifiers an enumeration oracle.
+            raise PermissionError("Solicitud no disponible")
+        return session_metadata
+
+    def _assert_tracking_owner(
+        self,
+        tracking_id: str,
+        owner_uid: str,
+        expected_session_ids: Optional[list[str]] = None,
+    ) -> tuple[dict, list[dict]]:
+        """Reload a tracking and every association; fail closed on mixed owners."""
+        if not tracking_id or not owner_uid or self.tracking_service is None:
+            raise PermissionError("Seguimiento no disponible")
+
+        actor_ctx = {"actor_uid": owner_uid, "actor_rol": ROLE_TEACHER}
+        try:
+            tracking = self.tracking_service.get_tracking(
+                tracking_id,
+                actor_ctx=actor_ctx,
+            )
+            rows = self.dynamo.query_all(
+                self.tracking_service.sessions_table,
+                Key("tracking_id").eq(str(tracking_id)),
+                index_name=self.tracking_service.SESSIONS_TRACKING_INDEX,
+            )
+        except Exception as exc:
+            raise PermissionError("Seguimiento no disponible") from exc
+
+        if any(str(row.get("owner_id") or "") != owner_uid for row in rows):
+            raise PermissionError("Seguimiento no disponible")
+
+        latest: dict[str, dict] = {}
+        for row in rows:
+            session_id = str(row.get("session_id") or "").strip()
+            if not session_id:
+                raise PermissionError("Seguimiento no disponible")
+            previous = latest.get(session_id)
+            if previous is None or str(row.get("updated_at") or "") >= str(previous.get("updated_at") or ""):
+                latest[session_id] = row
+        if expected_session_ids is not None:
+            expected = {str(value) for value in expected_session_ids}
+            if not expected:
+                raise PermissionError("Seguimiento no disponible")
+            snapshot = {}
+            for session_id in expected:
+                snapshot[session_id] = self._assert_session_owner(
+                    session_id,
+                    owner_uid,
+                    include_session=True,
+                )
+            latest = snapshot
+        elif not latest:
+            raise PermissionError("Seguimiento no disponible")
+        return tracking, sorted(
+            latest.values(),
+            key=lambda row: (
+                str(row.get("fecha") or ""),
+                str(row.get("hora") or ""),
+                str(row.get("session_id") or ""),
+            ),
+        )
+
+    def _assert_request_resource_owner(self, req: Mapping[str, Any]) -> None:
+        if req.get("report_type") == "TRACKING":
+            self._assert_tracking_owner(
+                str(req.get("tracking_id") or ""),
+                str(req.get("requester_uid") or ""),
+                req.get("session_ids"),
+            )
+            return
+        self._assert_session_owner(
+            str(req.get("session_id") or ""),
+            str(req.get("requester_uid") or ""),
+        )
+
+    def authorize_request_access(
+        self,
+        req: Mapping[str, Any],
+        *,
+        actor_uid: str,
+        actor_rol: str,
+    ) -> dict:
+        """Authorize reading a request and revalidate its current session owner."""
+        request_item = self._validate(req)
+        is_admin = actor_rol == ROLE_ADMIN
+        if not is_admin and request_item.get("requester_uid") != actor_uid:
+            raise PermissionError("Solicitud no disponible")
+
+        self._assert_request_resource_owner(request_item)
+        return request_item
 
     def _has_active_request_for_session(
         self,
@@ -363,34 +504,16 @@ class ReportRequestService:
                 "SessionService no disponible"
             )
 
-        session = (
-            self.session_service.get_session(
-                session_id
-            )
+        # Do not reveal whether a foreign session_id exists.
+        self._assert_session_owner(
+            session_id,
+            requester_uid,
+            include_session=True,
         )
 
-        if not session:
-            raise SessionNotFound(
-                "La sesion no existe"
-            )
-
-        # ------------------------------------------------------
-        # PARTICIPANTE
-        # ------------------------------------------------------
-
-        participant_id = session.get(
-            "participant_id"
-        )
-
-        if (
-            not participant_id
-            or participant_id == "__PENDING__"
-        ):
-            raise ValueError(
-                "La sesión no tiene un participante identificado. "
-                "Asigne primero un participante antes de solicitar "
-                "el informe."
-            )
+        # Solicitudes individuales se identifican por session_id; el ID
+        # del participante es opcional y no forma parte de la asociación.
+        participant_id = None
 
         # ------------------------------------------------------
         # EVITAR SOLICITUDES DUPLICADAS
@@ -416,8 +539,6 @@ class ReportRequestService:
             "sk": f"REQUEST#{request_id}",
 
             "session_id": session_id,
-            "participant_id": participant_id,
-
             "requester_uid": requester_uid,
             "requester_email": requester_email.lower(),
             "requester_rol": requester_rol,
@@ -484,6 +605,101 @@ class ReportRequestService:
 
         return item
 
+    def create_tracking_request(
+        self,
+        tracking_id: str,
+        *,
+        requester_uid: str,
+        requester_email: str,
+        requester_rol: str,
+        report_format: str = "PDF",
+    ) -> dict:
+        """Create a pending, owner-scoped request for a complete tracking PDF."""
+        if not requester_uid or not requester_email:
+            raise ValueError("requester_uid y requester_email obligatorios")
+        tracking, sessions = self._assert_tracking_owner(tracking_id, requester_uid)
+        report_format = str(report_format or "PDF").upper()
+        if report_format not in {"PDF", "XLSX"}:
+            raise ValueError("Formato de informe no válido.")
+        if self._has_active_tracking_request(tracking_id, requester_uid, report_format):
+            raise ValueError("Ya existe una solicitud activa de este formato para el seguimiento.")
+
+        now = DynamoDBService.now_iso()
+        request_id = uuid.uuid4().hex
+        item = {
+            "request_id": request_id,
+            "report_request_id": request_id,
+            "sk": f"REQUEST#{request_id}",
+            "report_type": "TRACKING",
+            "report_format": report_format,
+            "tracking_id": str(tracking_id),
+            "tracking_code": tracking.get("tracking_code"),
+            "session_count": len(sessions),
+            "session_ids": [str(session.get("session_id")) for session in sessions],
+            "requester_uid": requester_uid,
+            "requester_email": requester_email.lower(),
+            "requester_rol": requester_rol,
+            "motivo": f"TRACKING_{report_format}",
+            "status": STATUS_PENDING,
+            "reviewer_uid": None,
+            "reviewer_email": None,
+            "reviewer_rol": None,
+            "review_comments": None,
+            "rejection_reason": None,
+            "report_s3_key": None,
+            "report_filename": None,
+            "report_bytes": None,
+            "generation_error": None,
+            "pk_type": PK_TYPE_REPORT_REQUEST,
+            "created_at": now,
+            "requested_at": now,
+            "reviewed_at": None,
+            "updated_at": now,
+        }
+        self.dynamo.put_item(
+            self.table,
+            item,
+            condition_expression=Attr("request_id").not_exists(),
+        )
+        if self.audit:
+            try:
+                self.audit.log_report_requested(
+                    actor_uid=requester_uid,
+                    actor_email=requester_email,
+                    actor_rol=requester_rol,
+                    report_request_id=request_id,
+                    session_id=None,
+                    participant_id=None,
+                    extra={
+                        "report_type": "TRACKING",
+                        "report_format": report_format,
+                        "tracking_id": str(tracking_id),
+                        "tracking_code": tracking.get("tracking_code", ""),
+                        "session_count": len(sessions),
+                    },
+                )
+            except Exception:
+                pass
+        return item
+
+    def _has_active_tracking_request(
+        self,
+        tracking_id: str,
+        requester_uid: str,
+        report_format: str = "PDF",
+    ) -> bool:
+        items, _ = self.list_my_requests(requester_uid, limit=500)
+        return any(
+            item.get("report_type") == "TRACKING"
+            and str(item.get("report_format") or "PDF").upper() == report_format
+            and str(item.get("tracking_id") or "") == str(tracking_id)
+            and (
+                item.get("status") in {STATUS_PENDING, STATUS_APPROVED}
+                or (item.get("status") == STATUS_COMPLETED and not item.get("downloaded_at"))
+            )
+            for item in items
+        )
+
     # ==========================================================
     # CONSULTAR UNA SOLICITUD
     # ==========================================================
@@ -512,9 +728,8 @@ class ReportRequestService:
         except Exception as error:
 
             print(
-                "Error buscando solicitud por "
-                f"report_request_id {request_id}: "
-                f"{error}"
+                "Error buscando solicitud de informe "
+                f"(tipo={type(error).__name__})"
             )
 
         return None
@@ -687,10 +902,24 @@ class ReportRequestService:
             ]
 
         items = self._sort_by_date_desc(items)
+        # Requests can outlive or become detached from a session. Never expose
+        # such a record to a specialist unless the persisted session still
+        # confirms that specialist as its owner.
+        items = [
+            item for item in items
+            if self._request_session_owner_matches(item)
+        ]
         return (
             items[:limit],
             last,
         )
+
+    def _request_session_owner_matches(self, req: Mapping[str, Any]) -> bool:
+        try:
+            self._assert_request_resource_owner(req)
+            return True
+        except Exception:
+            return False
 
     # ==========================================================
     # LISTAR POR SESIÓN
@@ -754,6 +983,10 @@ class ReportRequestService:
                 request_id
             )
         )
+
+        # Administrative approval must not legitimize a request originally
+        # attached to another user's session or one whose owner has changed.
+        self._assert_request_resource_owner(req)
 
         current_status = req.get(
             "status"
@@ -822,18 +1055,55 @@ class ReportRequestService:
         # GENERAR PDF
         # ------------------------------------------------------
 
+        logger.info(
+            "report_generation_diagnostic event=started timestamp=%s request_id=%s pid=%s report_type=%s bucket=%s bucket_source=%s",
+            datetime.now(timezone.utc).isoformat(),
+            request_id,
+            os.getpid(),
+            req.get("report_type", "SESSION"),
+            getattr(self.s3, "report_bucket", "unavailable"),
+            getattr(self.s3, "report_bucket_source", "unavailable"),
+        )
+
         try:
 
-            self._generate_and_store_pdf(
+            final_req = self._generate_and_store_pdf(
                 request_id,
                 reviewer_ctx={
                     "actor_uid": reviewer_uid,
                     "actor_email": reviewer_email,
                     "actor_rol": reviewer_rol,
                 },
+                request_item=req,
+            )
+
+            logger.info(
+                "report_generation_diagnostic event=finished timestamp=%s request_id=%s pid=%s report_type=%s bucket=%s result_status=%s",
+                datetime.now(timezone.utc).isoformat(),
+                request_id,
+                os.getpid(),
+                req.get("report_type", "SESSION"),
+                getattr(self.s3, "report_bucket", "unavailable"),
+                final_req.get("status", "UNKNOWN"),
             )
 
         except Exception as exc:
+
+            logger.error(
+                "report_generation_diagnostic event=failed timestamp=%s request_id=%s pid=%s report_type=%s bucket=%s error_type=%s",
+                datetime.now(timezone.utc).isoformat(),
+                request_id,
+                os.getpid(),
+                req.get("report_type", "SESSION"),
+                getattr(self.s3, "report_bucket", "unavailable"),
+                type(exc).__name__,
+            )
+
+            logger.exception(
+                "No se pudo generar el informe aprobado (request_id=%s, report_type=%s)",
+                request_id,
+                req.get("report_type", "SESSION"),
+            )
 
             error_message = str(exc)
 
@@ -888,34 +1158,23 @@ class ReportRequestService:
                             "",
                         ),
                         approved=False,
-                        comments=(
+                        rejection_reason=(
                             "La solicitud fue aprobada, "
                             "pero ocurrió un error al "
                             "generar el informe. "
                             "Estado: ERROR."
                         ),
+                        resource_label=self._notification_resource_label(req),
                     )
 
                 except Exception:
                     pass
 
-            return (
-                self.get_request(
-                    request_id
-                )
-                or req
-            )
+            return req
 
         # ------------------------------------------------------
         # NOTIFICACIÓN
         # ------------------------------------------------------
-
-        final_req = (
-            self.get_request(
-                request_id
-            )
-            or req
-        )
 
         if (
             self.ses
@@ -938,7 +1197,7 @@ class ReportRequestService:
                         "",
                     ),
                     approved=True,
-                    comments=comments,
+                    resource_label=self._notification_resource_label(final_req),
                 )
 
             except Exception:
@@ -981,6 +1240,8 @@ class ReportRequestService:
                 request_id
             )
         )
+
+        self._assert_request_resource_owner(req)
 
         current_status = req.get(
             "status"
@@ -1064,7 +1325,8 @@ class ReportRequestService:
                         "",
                     ),
                     approved=False,
-                    comments=reason,
+                    rejection_reason=reason,
+                    resource_label=self._notification_resource_label(req),
                 )
 
             except Exception:
@@ -1087,6 +1349,7 @@ class ReportRequestService:
         reviewer_ctx: Optional[
             Mapping[str, str]
         ] = None,
+        request_item: Optional[Mapping[str, Any]] = None,
     ) -> dict:
         """
         Genera el PDF y lo almacena en S3 privado.
@@ -1101,11 +1364,15 @@ class ReportRequestService:
         de la nueva versión del PDF.
         """
 
+        # The report-id index is eventually consistent. Use the request
+        # already loaded by the caller immediately after approval when available.
         req = self._validate(
-            self.get_request(
-                request_id
-            )
+            dict(request_item) if request_item is not None else self.get_request(request_id)
         )
+
+        # Reject a stale or foreign association before changing request state
+        # or entering the retry error handler.
+        self._assert_request_resource_owner(req)
 
         current_status = req.get(
             "status"
@@ -1130,27 +1397,32 @@ class ReportRequestService:
                 "S3Service no disponible"
             )
 
-        session_id = req.get(
-            "session_id"
-        )
-
-        if not session_id:
-            raise ValueError(
-                "La solicitud no tiene session_id"
+        if req.get("report_type") == "TRACKING":
+            tracking, sessions = self._assert_tracking_owner(
+                str(req.get("tracking_id") or ""),
+                str(req.get("requester_uid") or ""),
+                req.get("session_ids"),
             )
-
-        # ------------------------------------------------------
-        # GENERAR PDF
-        # ------------------------------------------------------
-
-        pdf_bytes, s3_key = (
-            self.report_service.generate_and_upload_pdf(
+            generate_tracking = (
+                self.report_service.generate_and_upload_tracking_excel
+                if str(req.get("report_format") or "PDF").upper() == "XLSX"
+                else self.report_service.generate_and_upload_tracking_pdf
+            )
+            report_bytes, s3_key = generate_tracking(
+                tracking, sessions, request_id=request_id, owner_id=req.get("requester_uid"),
+            )
+        else:
+            session_id = req.get("session_id")
+            if not session_id:
+                raise ValueError("La solicitud no tiene session_id")
+            self._assert_session_owner(session_id, req.get("requester_uid", ""))
+            report_bytes, s3_key = self.report_service.generate_and_upload_pdf(
                 session_id,
                 request_id=request_id,
+                owner_id=req.get("requester_uid"),
             )
-        )
 
-        if not pdf_bytes:
+        if not report_bytes:
             raise RuntimeError(
                 "El PDF generado está vacío"
             )
@@ -1173,7 +1445,7 @@ class ReportRequestService:
             "status": STATUS_COMPLETED,
             "report_s3_key": s3_key,
             "report_filename": filename,
-            "report_bytes": len(pdf_bytes),
+            "report_bytes": len(report_bytes),
             "generation_error": None,
             "updated_at": now,
         }
@@ -1233,6 +1505,8 @@ class ReportRequestService:
             )
         )
 
+        self._assert_request_resource_owner(req)
+
         current_status = req.get(
             "status"
         )
@@ -1257,6 +1531,7 @@ class ReportRequestService:
                         "actor_email": reviewer_email,
                         "actor_rol": reviewer_rol,
                     },
+                    request_item=req,
                 )
             )
 
@@ -1264,9 +1539,7 @@ class ReportRequestService:
 
             updates = {
                 "status": STATUS_ERROR,
-                "generation_error": str(
-                    exc
-                ),
+                "generation_error": "No se pudo generar el informe.",
                 "updated_at": (
                     DynamoDBService.now_iso()
                 ),
@@ -1323,6 +1596,12 @@ class ReportRequestService:
             )
         )
 
+        # Check authorization before status or S3 metadata to avoid leaking
+        # details about another specialist's report request.
+        if actor_rol == ROLE_ADMIN or req.get("requester_uid") != actor_uid:
+            raise PermissionError("Solicitud no disponible")
+        self._assert_request_resource_owner(req)
+
         # ======================================================
         # 1. ESTADO
         # ======================================================
@@ -1368,21 +1647,8 @@ class ReportRequestService:
         # 4. PERMISOS
         # ======================================================
 
-        is_admin = (
-            actor_rol == ROLE_ADMIN
-        )
-
-        is_owner = (
-            req.get(
-                "requester_uid"
-            )
-            == actor_uid
-        )
-
-        if not is_admin and not is_owner:
-            raise PermissionError(
-                "No tiene permiso para descargar este informe"
-            )
+        # Report files are available only to the specialist who submitted
+        # the request. Administrators can review metadata but never download.
 
         if self.s3 is None:
             raise RuntimeError(
@@ -1479,3 +1745,28 @@ class ReportRequestService:
                 pass
 
         return url
+
+    def get_tracking_download_url(
+        self,
+        tracking_id: str,
+        request_id: str,
+        *,
+        actor_uid: str,
+        actor_email: str,
+        actor_rol: str,
+        expires_in: int = 300,
+    ) -> str:
+        req = self.get_request(request_id)
+        if (
+            not req
+            or req.get("report_type") != "TRACKING"
+            or str(req.get("tracking_id") or "") != str(tracking_id)
+        ):
+            raise PermissionError("Solicitud no disponible")
+        return self.get_download_url(
+            request_id,
+            actor_uid=actor_uid,
+            actor_email=actor_email,
+            actor_rol=actor_rol,
+            expires_in=expires_in,
+        )
