@@ -1,0 +1,90 @@
+{
+    "proyecto": "EmotionLab",
+    "version_modelo": "1.0.0-experimental",
+    "algoritmo": "KMeans",
+    "numero_grupos": 2,
+    "origen_entrenamiento": "reales_completos",
+    "registros_entrenamiento": 13,
+    "numero_variables": 12,
+    "variables": [
+        "estado_pre",
+        "nerviosismo_pre",
+        "preocupacion_pre",
+        "preparacion_pre",
+        "estado_facil",
+        "nerviosismo_facil",
+        "satisfaccion_facil",
+        "alivio_facil",
+        "estado_dificil",
+        "nerviosismo_dificil",
+        "satisfaccion_dificil",
+        "alivio_dificil"
+    ],
+    "escala_respuestas": {
+        "minimo": 1,
+        "maximo": 9
+    },
+    "preprocesamiento": "StandardScaler",
+    "perfiles_centroides": {
+        "grupo_menor_tension": 1,
+        "grupo_mayor_tension": 0,
+        "referencia_tension_centroides": {
+            "0": 3.5555555555555554,
+            "1": 2.0833333333333335
+        },
+        "centroide_menor_escalado": [
+            -0.21494338299826032,
+            -0.15240015240022872,
+            0.1048194851328669,
+            -0.25607375986579173,
+            -0.36799003609699366,
+            -0.3585053966162643,
+            -0.3003020931499795,
+            -0.34127787539671256,
+            -0.04497190133975184,
+            -0.082798092244448,
+            -0.3406126086223797,
+            -0.46816013611100893
+        ],
+        "coeficientes_escalados": {
+            "estado_pre": 0.051634071380866495,
+            "nerviosismo_pre": 0.03660982830791317,
+            "preocupacion_pre": -0.025179918088010775,
+            "preparacion_pre": 0.06151448167996955,
+            "estado_facil": 0.08839920320521609,
+            "nerviosismo_facil": 0.08612078669786205,
+            "satisfaccion_facil": 0.07213908842988277,
+            "alivio_facil": 0.08198236174168218,
+            "estado_dificil": 0.010803227954818306,
+            "nerviosismo_dificil": 0.01988990098468859,
+            "satisfaccion_dificil": 0.0818225502060393,
+            "alivio_dificil": 0.11246223795513466
+        },
+        "pesos_relativos_absolutos": {
+            "estado_pre": 0.07087163371469625,
+            "nerviosismo_pre": 0.05024973380576365,
+            "preocupacion_pre": 0.03456132518654792,
+            "preparacion_pre": 0.08443323753446447,
+            "estado_facil": 0.12133453323908586,
+            "nerviosismo_facil": 0.11820723578141241,
+            "satisfaccion_facil": 0.09901630677160321,
+            "alivio_facil": 0.11252693729232559,
+            "estado_dificil": 0.014828240231196766,
+            "nerviosismo_dificil": 0.027300380146485562,
+            "satisfaccion_dificil": 0.11230758397939543,
+            "alivio_dificil": 0.15436285231702293
+        }
+    },
+    "archivos": {
+        "modelo": "modelo_kmeans_v1.joblib",
+        "escalador": "escalador_v1.joblib"
+    },
+    "versiones": {
+        "python": "3.13.18",
+        "numpy": "2.4.6",
+        "pandas": "2.2.3",
+        "scipy": "1.16.3",
+        "scikit-learn": "1.6.1",
+        "joblib": "1.6.0"
+    }
+}

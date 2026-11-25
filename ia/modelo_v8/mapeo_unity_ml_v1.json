@@ -1,0 +1,81 @@
+{
+    "version": "2.0.0-12-preguntas",
+    "origen": "Unity",
+    "campo_puntuacion": "respuestaLabel",
+    "variables_modelo": [
+        "estado_pre",
+        "nerviosismo_pre",
+        "preocupacion_pre",
+        "preparacion_pre",
+        "estado_facil",
+        "nerviosismo_facil",
+        "satisfaccion_facil",
+        "alivio_facil",
+        "estado_dificil",
+        "nerviosismo_dificil",
+        "satisfaccion_dificil",
+        "alivio_dificil"
+    ],
+    "equivalencias": [
+        {
+            "escena": "waiting_room_inicial",
+            "idPregunta": "sentir_hoy",
+            "variable": "estado_pre"
+        },
+        {
+            "escena": "waiting_room_inicial",
+            "idPregunta": "nerviosismo",
+            "variable": "nerviosismo_pre"
+        },
+        {
+            "escena": "waiting_room_inicial",
+            "idPregunta": "preocupacion",
+            "variable": "preocupacion_pre"
+        },
+        {
+            "escena": "waiting_room_inicial",
+            "idPregunta": "preparacion",
+            "variable": "preparacion_pre"
+        },
+        {
+            "escena": "Retroalimentacion_Oficina",
+            "idPregunta": "sentir_hoy_cierre",
+            "variable": "estado_facil"
+        },
+        {
+            "escena": "Retroalimentacion_Oficina",
+            "idPregunta": "nerviosismo_cierre",
+            "variable": "nerviosismo_facil"
+        },
+        {
+            "escena": "Retroalimentacion_Oficina",
+            "idPregunta": "satisfaccion_cierre",
+            "variable": "satisfaccion_facil"
+        },
+        {
+            "escena": "Retroalimentacion_Oficina",
+            "idPregunta": "aliviado_cierre",
+            "variable": "alivio_facil"
+        },
+        {
+            "escena": "Retroalimentacion_Salon",
+            "idPregunta": "sentir_hoy_cierre",
+            "variable": "estado_dificil"
+        },
+        {
+            "escena": "Retroalimentacion_Salon",
+            "idPregunta": "nerviosismo_cierre",
+            "variable": "nerviosismo_dificil"
+        },
+        {
+            "escena": "Retroalimentacion_Salon",
+            "idPregunta": "satisfaccion_cierre",
+            "variable": "satisfaccion_dificil"
+        },
+        {
+            "escena": "Retroalimentacion_Salon",
+            "idPregunta": "aliviado_cierre",
+            "variable": "alivio_dificil"
+        }
+    ]
+}

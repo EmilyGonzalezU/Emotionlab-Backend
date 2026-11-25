@@ -9,6 +9,7 @@ Envía:
 from __future__ import annotations
 
 import os
+from html import escape
 from typing import Mapping, Optional
 
 import boto3
@@ -41,7 +42,7 @@ class SESServices:
 
         self.sender_email = os.getenv(
             "SES_SENDER_ADDRESS",
-            os.getenv("SES_SENDER_EMAIL", os.getenv("EMAIL_SENDER", "em.gonzalezu@duocuc.cl")),
+            os.getenv("SES_SENDER_EMAIL", os.getenv("EMAIL_SENDER", "")),
         ).strip()
         self.sender_name = os.getenv(
             "SES_SENDER_NAME",
@@ -88,10 +89,10 @@ class SESServices:
             )
             return True
         except ClientError as err:
-            print(f"[SES] Error enviando correo: {err}", flush=True)
+            print(f"[SES] Error enviando correo (tipo={type(err).__name__})", flush=True)
             return False
         except Exception as err:
-            print(f"[SES] Error inesperado: {err}", flush=True)
+            print(f"[SES] Error inesperado (tipo={type(err).__name__})", flush=True)
             return False
 
     # ------------------------------------------------------------------
@@ -163,19 +164,34 @@ class SESServices:
     def send_report_notification(
         self,
         to_email: str,
-        nombre: str,
-        aprobado: bool,
-        session_id: str,
+        nombre: Optional[str] = None,
+        aprobado: Optional[bool] = None,
+        session_id: str = "",
         rejection_reason: Optional[str] = None,
+        resource_label: Optional[str] = None,
+        *,
+        request_id: Optional[str] = None,
+        approved: Optional[bool] = None,
+        comments: Optional[str] = None,
     ) -> bool:
+        # Acepta ambos contratos: los nombres originales en español y los
+        # argumentos usados por ReportRequestService.
+        if aprobado is None:
+            aprobado = bool(approved)
+        rejection_reason = rejection_reason or comments
         estado = "Aprobado" if aprobado else "Rechazado"
         color = "#059669" if aprobado else "#DC2626"
         motivo = ""
         if not aprobado and rejection_reason:
-            motivo = f'<p><strong>Motivo del rechazo:</strong> {rejection_reason}</p>'
+            motivo = (
+                '<p><strong>Motivo del rechazo:</strong> '
+                f'{escape(str(rejection_reason))}</p>'
+            )
+        recurso = escape(resource_label or f"la sesion {session_id}")
+        nombre_seguro = escape(nombre or "especialista")
         body = f"""
-            <p>Hola <strong>{nombre}</strong>,</p>
-            <p>Tu solicitud de informe para la sesion <strong>{session_id}</strong> ha sido:</p>
+            <p>Hola <strong>{nombre_seguro}</strong>,</p>
+            <p>Tu solicitud de informe para <strong>{recurso}</strong> ha sido:</p>
             <p style="text-align: center; margin: 25px 0;">
                 <span style="display: inline-block; background: {color}; color: white; padding: 10px 24px; border-radius: 6px; font-size: 18px; font-weight: bold;">
                     {estado.upper()}

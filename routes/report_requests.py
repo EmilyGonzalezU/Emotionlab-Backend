@@ -11,6 +11,9 @@ Todas las operaciones quedan registradas en auditoría automáticamente por
 ReportRequestService.
 """
 
+import os
+from datetime import datetime, timezone
+
 from flask import Blueprint, current_app, g, jsonify, request
 
 from core.roles import ROLE_ADMIN, ROLE_TEACHER
@@ -38,6 +41,37 @@ def _current_actor() -> tuple[str, str, str]:
         from core.exceptions import AuthenticationError
         raise AuthenticationError("Usuario autenticado sin uid/email válidos")
     return uid, email, rol
+
+
+_ADMIN_REQUEST_FIELDS = (
+    "request_id",
+    "report_request_id",
+    "report_type",
+    "report_format",
+    "session_id",
+    "tracking_id",
+    "tracking_code",
+    "session_count",
+    "requester_uid",
+    "motivo",
+    "status",
+    "created_at",
+    "updated_at",
+    "reviewer_uid",
+    "reviewer_rol",
+    "reviewed_at",
+    "rejection_reason",
+    "review_comments",
+)
+
+
+def _admin_request_public(item):
+    """Expose only the administrative metadata approved for report review."""
+    return {
+        field: item[field]
+        for field in _ADMIN_REQUEST_FIELDS
+        if item.get(field) is not None
+    }
 
 
 # ============================================================
@@ -71,8 +105,13 @@ def create_request():
         )
     except ValueError as ve:
         return jsonify({"error": str(ve)}), 400
+    except PermissionError:
+        # Same response for missing and foreign sessions; do not expose an
+        # existence oracle for session_id values.
+        return jsonify({"error": "Sesión no disponible para solicitar informe."}), 404
     except Exception as exc:
-        return jsonify({"error": f"Error creando solicitud: {exc}"}), 500
+        current_app.logger.error("Error creando solicitud de informe (tipo=%s)", type(exc).__name__)
+        return jsonify({"error": "No se pudo crear la solicitud de informe."}), 500
 
     return jsonify(req), 201
 
@@ -97,14 +136,30 @@ def list_requests():
     limit = int(request.args.get("limit") or 100)
     mine = request.args.get("mine", "").lower() in {"1", "true", "yes", "si"}
 
-    items, _next_key = _svc().list_requests(status=status, limit=limit)
+    # Si el usuario NO es admin, SIEMPRE se le devuelven solo sus
+    # solicitudes. Para garantizar que REJECTED / APPROVED /
+    # COMPLETED antiguos aparezcan incluso si el total supera el
+    # limit del scan global, usamos list_my_requests (query por PK
+    # requester_uid en vez de scan). Un profesor nunca debe ver las
+    # solicitudes de otros.
+    if actor_rol != ROLE_ADMIN or mine:
+        items, _next_key = _svc().list_my_requests(
+            actor_uid,
+            status=status,
+            limit=max(limit, 500),
+        )
+        if not mine and actor_rol == ROLE_ADMIN:
+            # Admin pidió "mine", pero list_my_requests ya filtra por
+            # requester_uid así que no necesitamos filtrar extra.
+            pass
+    else:
+        items, _next_key = _svc().list_requests(
+            status=status,
+            limit=limit,
+        )
 
-    # Si es profesor y pide "mine" o simplemente es profesor sin permiso admin, filtramos.
-    if actor_rol != ROLE_ADMIN:
-        items = [i for i in items if i.get("requester_uid") == actor_uid]
-    elif mine:
-        # Admin pide explícitamente las suyas
-        items = [i for i in items if i.get("requester_uid") == actor_uid]
+    if actor_rol == ROLE_ADMIN:
+        items = [_admin_request_public(item) for item in items]
 
     return jsonify({"items": items, "count": len(items)}), 200
 
@@ -122,10 +177,18 @@ def get_request(request_id):
     if not req:
         return jsonify({"error": "Solicitud no encontrada"}), 404
 
-    # Profesor solo puede ver sus propias solicitudes
-    if actor_rol != ROLE_ADMIN and req.get("requester_uid") != actor_uid:
-        from core.exceptions import AuthorizationError
-        raise AuthorizationError("No puede ver solicitudes de otros especialistas")
+    try:
+        req = _svc().authorize_request_access(
+            req,
+            actor_uid=actor_uid,
+            actor_rol=actor_rol,
+        )
+    except PermissionError:
+        # Uniform 404 for missing, foreign, or detached session requests.
+        return jsonify({"error": "Solicitud no encontrada"}), 404
+
+    if actor_rol == ROLE_ADMIN:
+        req = _admin_request_public(req)
 
     return jsonify(req), 200
 
@@ -146,6 +209,10 @@ def review_request(request_id):
         reason (str):     (Requerido si approved=False) Motivo de rechazo.
     """
     reviewer_uid, reviewer_email, reviewer_rol = _current_actor()
+    current_app.logger.info(
+        "report_approval_diagnostic event=received timestamp=%s request_id=%s pid=%s method=%s path=%s",
+        datetime.now(timezone.utc).isoformat(), request_id, os.getpid(), request.method, request.path,
+    )
     body = request.get_json(silent=True) or {}
     approved = body.get("approved")
     if approved is None:
@@ -175,12 +242,24 @@ def review_request(request_id):
                 reviewer_rol=reviewer_rol,
                 reason=reason,
             )
+        current_app.logger.info(
+            "report_approval_diagnostic event=completed timestamp=%s request_id=%s pid=%s method=%s path=%s approved=%s result_status=%s",
+            datetime.now(timezone.utc).isoformat(), request_id, os.getpid(), request.method, request.path,
+            bool(approved), result.get("status", "UNKNOWN"),
+        )
     except ValueError as ve:
         return jsonify({"error": str(ve)}), 400
+    except PermissionError:
+        return jsonify({"error": "Solicitud no encontrada"}), 404
     except Exception as exc:
-        return jsonify({"error": f"Error revisando solicitud: {exc}"}), 500
+        current_app.logger.error(
+            "report_approval_diagnostic event=failed timestamp=%s request_id=%s pid=%s method=%s path=%s error_type=%s",
+            datetime.now(timezone.utc).isoformat(), request_id, os.getpid(), request.method, request.path, type(exc).__name__,
+        )
+        current_app.logger.error("Error revisando solicitud de informe (tipo=%s)", type(exc).__name__)
+        return jsonify({"error": "No se pudo revisar la solicitud de informe."}), 500
 
-    return jsonify(result), 200
+    return jsonify(_admin_request_public(result)), 200
 
 
 # ============================================================
@@ -189,13 +268,12 @@ def review_request(request_id):
 
 @report_requests_bp.get("/<request_id>/download")
 @jwt_required
-@roles_required(ROLE_TEACHER, ROLE_ADMIN)
+@roles_required(ROLE_TEACHER)
 def download_request(request_id):
     """Retorna una URL temporal de S3 para descargar el PDF.
 
-    Reglas de acceso:
-      - Administrador: cualquier solicitud en estado APPROVED o COMPLETED.
-      - Especialista: solo sus propias solicitudes ya aprobadas/completadas.
+    Solo el especialista solicitante puede descargar el PDF aprobado y
+    generado. El administrador revisa metadatos, pero no descarga informes.
 
     Registra AUDIT_REPORT_DOWNLOADED automáticamente.
     """
@@ -211,10 +289,12 @@ def download_request(request_id):
         )
     except ValueError as ve:
         return jsonify({"error": str(ve)}), 400
-    except PermissionError as pe:
-        from core.exceptions import AuthorizationError
-        raise AuthorizationError(str(pe))
+    except PermissionError:
+        # Avoid distinguishing another specialist's request from an unknown
+        # request id.
+        return jsonify({"error": "Solicitud no encontrada"}), 404
     except Exception as exc:
-        return jsonify({"error": f"Error generando URL de descarga: {exc}"}), 500
+        current_app.logger.error("Error generando URL de descarga (tipo=%s)", type(exc).__name__)
+        return jsonify({"error": "No se pudo generar el enlace de descarga."}), 500
 
     return jsonify({"download_url": url, "expires_in_seconds": 300}), 200

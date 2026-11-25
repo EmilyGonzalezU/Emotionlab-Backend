@@ -1,8 +1,8 @@
 """Rutas para la administración de participantes."""
 
-from flask import Blueprint, current_app, jsonify, request
+from flask import Blueprint, current_app, g, jsonify, request
 
-from core.roles import ROLE_ADMIN, ROLE_TEACHER
+from core.roles import ROLE_TEACHER
 from middleware.jwt_required import jwt_required
 from middleware.roles_required import roles_required
 
@@ -18,6 +18,26 @@ def _get_service():
     """Obtiene el ParticipantService registrado en Flask."""
     return current_app.extensions["services"]["participant_service"]
 
+def _actor_uid():
+    user = getattr(g, "current_user", None) or {}
+    claims = getattr(g, "current_claims", None) or {}
+    return str(user.get("uid") or user.get("sub") or claims.get("sub") or "")
+
+def _visible(participant):
+    uid = _actor_uid()
+    if not uid or not participant:
+        return False
+    if str(participant.get("created_by") or "") == uid:
+        return True
+    sessions = current_app.extensions["services"]["session_service"].list_sessions(include_raw_json=False)
+    return any(s.get("owner_id") == uid and s.get("participant_id") == participant.get("participant_id") for s in sessions)
+
+def _visible_many(participants):
+    uid = _actor_uid()
+    sessions = current_app.extensions["services"]["session_service"].list_sessions(include_raw_json=False) if uid else []
+    owned_ids = {s.get("participant_id") for s in sessions if s.get("owner_id") == uid and s.get("participant_id")}
+    return [p for p in participants if p.get("created_by") == uid or p.get("participant_id") in owned_ids]
+
 
 # ==========================================================
 # LISTAR PARTICIPANTES
@@ -25,7 +45,7 @@ def _get_service():
 
 @participants_bp.get("")
 @jwt_required
-@roles_required(ROLE_ADMIN, ROLE_TEACHER)
+@roles_required(ROLE_TEACHER)
 def list_participants():
     """
     Lista todos los participantes.
@@ -40,9 +60,9 @@ def list_participants():
     service = _get_service()
 
     if name:
-        participants = service.search_by_name(name)
+        participants = _visible_many(service.search_by_name(name))
     else:
-        participants = service.list_participants()
+        participants = _visible_many(service.list_participants())
 
     return jsonify(participants), 200
 
@@ -53,7 +73,7 @@ def list_participants():
 
 @participants_bp.get("/search")
 @jwt_required
-@roles_required(ROLE_ADMIN, ROLE_TEACHER)
+@roles_required(ROLE_TEACHER)
 def search_participants():
     """
     Busca participantes por coincidencia parcial de nombre.
@@ -68,7 +88,7 @@ def search_participants():
     if not name:
         return jsonify([]), 200
 
-    participants = _get_service().search_by_name(name)
+    participants = _visible_many(_get_service().search_by_name(name))
 
     return jsonify(participants), 200
 
@@ -79,7 +99,7 @@ def search_participants():
 
 @participants_bp.post("")
 @jwt_required
-@roles_required(ROLE_ADMIN, ROLE_TEACHER)
+@roles_required(ROLE_TEACHER)
 def create_participant():
     """
     Selecciona un participante existente mediante participant_id o crea uno
@@ -104,13 +124,6 @@ def create_participant():
     """
 
     body = request.get_json(silent=True) or {}
-
-    current_app.logger.warning(
-        "DEBUG PARTICIPANT | content_type=%s | raw=%s | json=%s",
-        request.content_type,
-        request.get_data(as_text=True),
-        body,
-    )
 
     nombre = body.get("nombre")
     if not isinstance(nombre, str) or not nombre.strip():
@@ -148,7 +161,11 @@ def create_participant():
             nombre=nombre,
             participant_id=participant_id,
             observaciones=observaciones,
+            actor_ctx={"actor_uid": _actor_uid(), "actor_rol": (getattr(g, "current_user", None) or {}).get("rol")},
         )
+
+        if not _visible(participant):
+            return jsonify({"error": "Participante no encontrado"}), 404
 
         return jsonify(participant), 200
 
@@ -177,7 +194,7 @@ def create_participant():
 
 @participants_bp.get("/<participant_id>")
 @jwt_required
-@roles_required(ROLE_ADMIN, ROLE_TEACHER)
+@roles_required(ROLE_TEACHER)
 def get_participant(participant_id):
     """
     Obtiene un participante mediante su ID anonimizado.
@@ -196,7 +213,7 @@ def get_participant(participant_id):
         participant_id
     )
 
-    if not participant:
+    if not participant or not _visible(participant):
         return jsonify(
             {
                 "error": "Participante no encontrado"
@@ -212,7 +229,7 @@ def get_participant(participant_id):
 
 @participants_bp.patch("/<participant_id>")
 @jwt_required
-@roles_required(ROLE_ADMIN, ROLE_TEACHER)
+@roles_required(ROLE_TEACHER)
 def update_participant(participant_id):
     """
     Actualiza las observaciones de un participante.
@@ -228,6 +245,9 @@ def update_participant(participant_id):
                 "error": "observaciones es obligatoria"
             }
         ), 400
+
+    if not _visible(_get_service().get_participant(participant_id)):
+        return jsonify({"error": "Participante no encontrado"}), 404
 
     try:
         _get_service().update_observations(

@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import re
 from typing import TYPE_CHECKING, Any, Mapping, Optional
+from zoneinfo import ZoneInfo
 
 from boto3.dynamodb.conditions import Attr, Key
 
 from core.constants import (
     DYNAMODB_TABLE_SESSIONS,
+    PK_TYPE_CAPTURE_LOCK,
     PK_TYPE_SESSION,
 )
 from core.exceptions import SessionNotFound
@@ -75,10 +77,6 @@ PENDING_PARTICIPANT_ID = "__PENDING__"
 
 STATUS_IMPORTED = "imported"
 
-STATUS_PENDING_PREDICTION = "pending_prediction"
-
-STATUS_PREDICTED = "predicted"
-
 STATUS_PENDING_ASSIGNMENT = "pending_assignment"
 
 STATUS_COMPLETED = "completed"
@@ -91,20 +89,76 @@ STATUS_IDENTIFIED = "identificada"
 
 STATUS_PROCESSING_ERROR = "processing_error"
 
+# ------------------------------------------------------------------
+# Estados del ciclo de captura (experiencia iniciada por EmotionLab).
+#
+# Son estados propios de la experiencia de captura y no deben
+# confundirse con `STATUS_COMPLETED` (sesión ya procesada/identificada):
+# una experiencia `captured` no ha sido procesada ni asignada.
+# ------------------------------------------------------------------
+
+STATUS_CAPTURING = "capturing"
+
+STATUS_FINALIZING = "finalizing"
+
+STATUS_CAPTURED = "captured"
+
+# Estado transitorio durante la extracción de los JSON desde AWS.
+STATUS_IMPORTING = "importing"
+
+# La extracción no pudo completarse (fallo de descarga o sin archivos).
+# No es un estado terminal: requiere revisión/reintento del especialista.
+STATUS_CAPTURE_IMPORT_ERROR = "capture_import_error"
+
 
 VALID_SESSION_STATUSES = frozenset(
     {
         STATUS_IMPORTED,
-        STATUS_PENDING_PREDICTION,
-        STATUS_PREDICTED,
         STATUS_PENDING_ASSIGNMENT,
         STATUS_COMPLETED,
         STATUS_IMPORT_ERROR,
         STATUS_PENDING_IDENTIFICATION,
         STATUS_IDENTIFIED,
         STATUS_PROCESSING_ERROR,
+        STATUS_CAPTURING,
+        STATUS_FINALIZING,
+        STATUS_IMPORTING,
+        STATUS_CAPTURED,
+        STATUS_CAPTURE_IMPORT_ERROR,
     }
 )
+
+
+# ------------------------------------------------------------------
+# Atributos / índices del ciclo de captura.
+#
+# `lens_session_id` es la identidad ORIGINAL de la captura del lente
+# (el `sessionId` que genera la Lambda `createSession`). Nunca
+# reemplaza al `session_id` de EmotionLab: solo vincula la experiencia
+# EmotionLab con su origen para poder centralizar los registros.
+# ------------------------------------------------------------------
+
+CAPTURE_LENS_SESSION_ATTR = "lens_session_id"
+
+CAPTURE_LENS_SESSION_GSI = "gsi-sessions-lens-session"
+
+# Prefijo del `sk` del slot de captura. La fila resultante NO es una
+# sesión: se usa como cerrojo atómico para garantizar una única
+# experiencia activa.
+CAPTURE_LOCK_SK_PREFIX = "capture-lock#"
+
+# Clave fija del cerrojo GLOBAL de captura. Al ser constante, la escritura
+# condicional (`attribute_not_exists(sk)`) impide atómicamente que se inicie
+# una segunda experiencia mientras exista otra activa en el sistema.
+CAPTURE_LOCK_SK = f"{CAPTURE_LOCK_SK_PREFIX}global"
+
+# Estado del cerrojo cuando la confirmación remota del PIN quedó
+# indeterminada (timeout ambiguo tras enviar `POST /session/confirm`). La
+# experiencia NO se crea y el cerrojo permanece retenido hasta resolver la
+# operación; un `request_token` repetido NO vuelve a confirmar el PIN.
+CAPTURE_CONFIRMATION_UNKNOWN = "confirmation_unknown"
+CAPTURE_CONFIRMATION_IN_PROGRESS = "confirmation_in_progress"
+CAPTURE_CONFIRMATION_SUCCEEDED = "confirmation_succeeded"
 
 
 # ==========================================================
@@ -333,7 +387,7 @@ class SessionService:
 
             print(
                 "Error resolviendo clave de sesión "
-                f"{session_id}: {error}"
+                f"(tipo={type(error).__name__})"
             )
 
             return None
@@ -390,8 +444,8 @@ class SessionService:
         except Exception as error:
 
             print(
-                "Error buscando sesión por "
-                f"session_id {session_id}: {error}"
+                "Error buscando sesión "
+                f"(tipo={type(error).__name__})"
             )
 
         # Compatibilidad legacy
@@ -405,6 +459,48 @@ class SessionService:
                 ):
 
                     return session
+
+        return None
+
+
+    def get_session_owner(
+        self,
+        session_id: str,
+    ) -> Optional[dict[str, str]]:
+        """Return only the persisted owner metadata for an authorization check.
+
+        Report review needs to confirm the requester's current ownership, but
+        the administrator must not load or receive the session payload. The
+        session-id GSI projects all attributes; this query explicitly asks
+        DynamoDB for only the owner field.
+        """
+        if not session_id:
+            return None
+
+        try:
+            matches = self.dynamo.query_all(
+                self.table,
+                Key("session_id").eq(str(session_id)),
+                index_name="gsi-sessions-sessionid",
+                max_items=1,
+                projection_expression="owner_id",
+            )
+            if matches:
+                owner_id = matches[0].get("owner_id")
+                return {"owner_id": owner_id} if owner_id else None
+        except Exception as error:
+            print(
+                "Error buscando propietario de sesión "
+                f"(tipo={type(error).__name__})"
+            )
+
+        # Compatibility with the separately configured legacy source. The
+        # result returned to callers remains an owner-only projection.
+        if self.legacy_data_service:
+            for session in self._list_legacy_sessions():
+                if session.get("session_id") == session_id:
+                    owner_id = session.get("owner_id")
+                    return {"owner_id": owner_id} if owner_id else None
 
         return None
 
@@ -451,8 +547,8 @@ class SessionService:
         except Exception as error:
 
             print(
-                "Error buscando source_key "
-                f"{source_key}: {error}"
+                "Error buscando sesión por source_key "
+                f"(tipo={type(error).__name__})"
             )
 
             return None
@@ -478,7 +574,6 @@ class SessionService:
         participant_id: Optional[str] = None,
         observaciones: Optional[str] = None,
         source_key: Optional[str] = None,
-        prediction: Optional[Mapping[str, Any]] = None,
         status: str = STATUS_PENDING_IDENTIFICATION,
         fecha: Optional[str] = None,
         hora: Optional[str] = None,
@@ -503,15 +598,6 @@ class SessionService:
 
             raise ValueError(
                 "raw_json debe ser un objeto JSON"
-            )
-
-        if (
-            prediction is not None
-            and not isinstance(prediction, Mapping)
-        ):
-
-            raise ValueError(
-                "prediction debe ser un objeto"
             )
 
         if participant_id is not None:
@@ -632,13 +718,6 @@ class SessionService:
             "observaciones":
                 observaciones,
 
-            "prediction":
-                (
-                    deepcopy(dict(prediction))
-                    if prediction
-                    else None
-                ),
-
             "status": status,
 
             "estado": status,
@@ -673,12 +752,6 @@ class SessionService:
 
             "raw_json":
                 raw_inline,
-
-            "prediction_error":
-                None,
-
-            "prediction_missing_fields":
-                [],
 
             "pk_type":
                 PK_TYPE_SESSION,
@@ -896,6 +969,7 @@ class SessionService:
         date_from: Optional[str] = None,
         date_to: Optional[str] = None,
         status: Optional[str] = None,
+        include_raw_json: bool = True,
     ) -> list[dict]:
 
         if status is not None:
@@ -907,6 +981,7 @@ class SessionService:
             status,
             date_from,
             date_to,
+            bool(include_raw_json),
         )
 
         cached = SESSION_CACHE.get(
@@ -943,8 +1018,8 @@ class SessionService:
         except Exception as error:
 
             print(
-                "Error listando sesiones: "
-                f"{error}"
+                "Error listando sesiones "
+                f"(tipo={type(error).__name__})"
             )
 
             try:
@@ -968,10 +1043,14 @@ class SessionService:
 
         filtered = [
 
-            self._materialize_raw_json(s)
+            (self._materialize_raw_json(s) if include_raw_json else s)
             or s
 
             for s in items
+
+            # La fila técnica del slot de captura no es una sesión.
+            if s.get("pk_type")
+                != PK_TYPE_CAPTURE_LOCK
 
             if self._is_in_date_range(
                 self._get_date(s),
@@ -1178,9 +1257,6 @@ class SessionService:
             "observaciones":
                 None,
 
-            "prediction":
-                None,
-
             "status":
                 STATUS_PENDING_IDENTIFICATION,
 
@@ -1217,12 +1293,6 @@ class SessionService:
 
             "duracion_estimada":
                 False,
-
-            "prediction_error":
-                None,
-
-            "prediction_missing_fields":
-                [],
 
             "raw_json":
                 dict(record),
@@ -1272,6 +1342,8 @@ class SessionService:
     def list_sessions_by_date(
         self,
         fecha: str,
+        *,
+        include_raw_json: bool = True,
     ) -> list[dict]:
 
         self._validate_date(fecha)
@@ -1279,6 +1351,7 @@ class SessionService:
         cache_key = (
             "sessions_by_date",
             fecha,
+            bool(include_raw_json),
         )
 
         cached = SESSION_CACHE.get(
@@ -1313,22 +1386,19 @@ class SessionService:
             for session in exact_match:
 
                 combined[
-                    self._session_unique_key(
-                        session
-                    )
+                    self._session_unique_key(session)
                 ] = (
-                    self._materialize_raw_json(
-                        session
-                    )
-                    or session
-                )
+                    self._materialize_raw_json(session)
+                    if include_raw_json
+                    else session
+                ) or session
 
         except Exception:
 
             exact_match = []
 
         # Compatibilidad
-        for session in self.list_sessions():
+        for session in self.list_sessions(include_raw_json=include_raw_json):
 
             if (
                 self._get_date(session)
@@ -1374,60 +1444,6 @@ class SessionService:
                     )
                 )
             },
-            reverse=True,
-        )
-
-
-    # ======================================================
-    # SESIONES PENDIENTES
-    # ======================================================
-
-    def list_pending_sessions(
-        self,
-    ) -> list[dict]:
-
-        pending_statuses = [
-            STATUS_PENDING_PREDICTION,
-            STATUS_PENDING_ASSIGNMENT,
-        ]
-
-        pending: list[dict] = []
-
-        try:
-
-            for status in pending_statuses:
-
-                pending.extend(
-                    self.dynamo.query_all(
-                        self.table,
-                        Key("status").eq(
-                            status
-                        ),
-                        index_name=
-                            "gsi-sessions-status-date",
-                    )
-                )
-
-        except Exception:
-
-            for status in pending_statuses:
-
-                pending.extend(
-                    self.list_sessions(
-                        status=status
-                    )
-                )
-
-        return sorted(
-
-            [
-                self._materialize_raw_json(x)
-                or x
-
-                for x in pending
-            ],
-
-            key=self._date_time_sort_key,
             reverse=True,
         )
 
@@ -1942,70 +1958,6 @@ class SessionService:
 
 
     # ======================================================
-    # ACTUALIZAR PREDICCIÓN
-    # ======================================================
-
-    def update_prediction(
-        self,
-        session_id: str,
-        prediction: Mapping[str, Any],
-    ) -> None:
-
-        if not isinstance(
-            prediction,
-            Mapping,
-        ):
-
-            raise ValueError(
-                "prediction debe ser un objeto"
-            )
-
-        key = (
-            self._resolve_session_key(
-                session_id
-            )
-        )
-
-        if not key:
-
-            raise SessionNotFound(
-                "La sesion no existe"
-            )
-
-        self.dynamo.update_item(
-
-            self.table,
-
-            key=key,
-
-            update_data={
-
-                "prediction":
-                    deepcopy(
-                        dict(prediction)
-                    ),
-
-                "status":
-                    STATUS_PENDING_IDENTIFICATION,
-
-                "estado":
-                    STATUS_PENDING_IDENTIFICATION,
-
-                "prediction_error":
-                    None,
-
-                "prediction_missing_fields":
-                    [],
-
-                "updated_at":
-                    DynamoDBService.now_iso(),
-            },
-        )
-
-        invalidate_sessions_cache()
-
-
-    # ======================================================
     # ACTUALIZAR ESTADO
     # ======================================================
 
@@ -2044,56 +1996,6 @@ class SessionService:
 
                 "estado":
                     status,
-
-                "updated_at":
-                    DynamoDBService.now_iso(),
-            },
-        )
-
-        invalidate_sessions_cache()
-
-
-    # ======================================================
-    # INFORMACIÓN PREDICCIÓN PENDIENTE
-    # ======================================================
-
-    def update_prediction_pending_info(
-        self,
-        session_id: str,
-        missing_fields: list[str],
-    ) -> None:
-
-        key = (
-            self._resolve_session_key(
-                session_id
-            )
-        )
-
-        if not key:
-
-            raise SessionNotFound(
-                "La sesion no existe"
-            )
-
-        self.dynamo.update_item(
-
-            self.table,
-
-            key=key,
-
-            update_data={
-
-                "prediction_error":
-                    (
-                        "Faltan datos requeridos "
-                        "para ejecutar la predicción"
-                    ),
-
-                "prediction_missing_fields":
-                    list(
-                        missing_fields
-                        or []
-                    ),
 
                 "updated_at":
                     DynamoDBService.now_iso(),
@@ -2500,11 +2402,34 @@ class SessionService:
     # OBTENER FECHA
     # ======================================================
 
+    @staticmethod
+    def _capture_local_date_time(
+        session: Mapping[str, Any],
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Convierte un instante UTC explícito a la zona de presentación local."""
+        value = session.get("capture_started_at")
+        if not isinstance(value, str) or not value.strip():
+            return None, None
+        try:
+            moment = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None, None
+        if moment.tzinfo is None:
+            # Los timestamps sin zona son ambiguos; los campos legacy se
+            # conservan en vez de asignarles una zona por conjetura.
+            return None, None
+        local = moment.astimezone(ZoneInfo("America/Santiago"))
+        return local.date().isoformat(), local.strftime("%H:%M")
+
     @classmethod
     def _get_date(
         cls,
         session: Mapping[str, Any],
     ) -> Optional[str]:
+
+        local_date, _local_time = cls._capture_local_date_time(session)
+        if local_date:
+            return local_date
 
         if fecha := session.get(
             "fecha"
@@ -2588,6 +2513,10 @@ class SessionService:
         cls,
         session: Mapping[str, Any],
     ) -> Optional[str]:
+
+        _local_date, local_time = cls._capture_local_date_time(session)
+        if local_time:
+            return local_time
 
         if hora := session.get(
             "hora"
@@ -2988,3 +2917,708 @@ class SessionService:
             session_id,
             data,
         )
+
+
+    def merge_session_data_set(
+        self,
+        session_id: str,
+        raw_json: Mapping[str, Any],
+        *,
+        fields: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        """
+        Incorpora un conjunto de datos adicional a una sesión existente.
+
+        La identidad no cambia: `session_id` es el mismo de la experiencia
+        original y `raw_json` ya llega fusionado por el llamador. Aquí solo
+        se persiste respetando el almacenamiento externo cuando la
+        información excede el umbral inline. Los campos derivados
+        (`fields`) se aplican en la misma escritura para que el detalle de
+        la sesión quede consistente.
+        """
+
+        key = self._resolve_session_key(session_id)
+
+        if not key:
+
+            raise SessionNotFound(
+                "La sesion no existe"
+            )
+
+        if not isinstance(raw_json, Mapping):
+
+            raise ValueError(
+                "raw_json debe ser un objeto JSON"
+            )
+
+        existing = self.get_session(session_id) or {}
+
+        raw_inline, raw_s3_key = (
+            self._maybe_store_raw_json_externally(
+                raw_json,
+                existing.get("fecha"),
+                session_id,
+            )
+        )
+
+        updates: dict[str, Any] = {
+
+            "raw_json":
+                raw_inline,
+
+            "raw_json_s3_key":
+                raw_s3_key,
+
+            "updated_at":
+                DynamoDBService.now_iso(),
+        }
+
+        if fields:
+
+            updates.update(
+                dict(fields)
+            )
+
+        self.dynamo.update_item(
+
+            self.table,
+
+            key=key,
+
+            update_data=updates,
+        )
+
+        invalidate_sessions_cache()
+
+    # ======================================================
+    # CICLO DE CAPTURA (EXPERIENCIA DE EMOTIONLAB)
+    # ======================================================
+    #
+    # Una experiencia de captura es una sesión normal con estas
+    # particularidades:
+    #
+    #   - `session_id` es un UUID generado por EmotionLab al iniciar.
+    #   - `participant_id` queda en `__PENDING__`: no se conoce al alumno.
+    #   - `owner_id` identifica al especialista que la inició.
+    #   - `status` recorre capturing -> finalizing -> captured.
+    #   - `lens_session_id` conserva la identidad ORIGINAL de la captura
+    #     del lente y está indexado por `gsi-sessions-lens-session`.
+    #
+    # La identidad del lente (`lens_session_id`) y la de Unity
+    # (`unity_session_id`, por registro) NUNCA reemplazan al
+    # `session_id` de EmotionLab ni a los identificadores originales.
+
+    @staticmethod
+    def _capture_sk(session_id: str) -> str:
+        """Clave de ordenación determinista de una experiencia de captura.
+
+        Al depender solo de `session_id`, un reintento de red que vuelva a
+        crear la misma experiencia colisiona con la misma clave y la
+        escritura condicional lo impide: no se crean experiencias
+        adicionales.
+        """
+
+        return f"capture#{session_id}"
+
+    def create_capture_session(
+        self,
+        session_id: str,
+        *,
+        owner_id: str,
+        organization_id: Optional[str] = None,
+        device_id: Optional[str] = None,
+        fecha: Optional[str] = None,
+        hora: Optional[str] = None,
+        capture_token: Optional[str] = None,
+        lens_participant_id: Optional[str] = None,
+    ) -> dict:
+        """Crea la experiencia de captura con `session_id` de EmotionLab.
+
+        Devuelve `{"created": bool, "session": dict}`. Si la experiencia
+        ya existía (reintento con el mismo `session_id`), `created` es
+        False y se devuelve la experiencia existente sin duplicarla.
+        """
+
+        if not isinstance(session_id, str) or not session_id.strip():
+
+            raise ValueError("session_id es obligatorio")
+
+        if not isinstance(owner_id, str) or not owner_id.strip():
+
+            raise ValueError("owner_id es obligatorio")
+
+        session_id = session_id.strip()
+
+        now = DynamoDBService.now_iso()
+
+        now_dt = datetime.now(timezone.utc)
+
+        date_part = (
+            fecha or now_dt.strftime("%Y-%m-%d")
+        ).strip()
+
+        time_part = (
+            hora or now_dt.strftime("%H:%M")
+        ).strip()
+
+        data: dict[str, Any] = {
+
+            "session_id": session_id,
+
+            "participant_id": PENDING_PARTICIPANT_ID,
+
+            "nombre": None,
+
+            "observaciones": None,
+
+            "status": STATUS_CAPTURING,
+
+            "estado": STATUS_CAPTURING,
+
+            "fecha": date_part,
+
+            "hora": time_part,
+
+            "sk": self._capture_sk(session_id),
+
+            # El detalle de los registros se guarda aquí (con spill a S3
+            # cuando excede el umbral inline). Los índices ligeros viven
+            # en atributos separados.
+            "raw_json": {"records": []},
+
+            "raw_json_s3_key": None,
+
+            "owner_id": owner_id.strip(),
+
+            "organization_id": organization_id,
+
+            "device_id": device_id,
+
+            "capture_token": capture_token,
+
+            # `idParticipante` del lente para correlacionar el registro de
+            # Unity de ESTA captura. No es la identidad del alumno.
+            "lens_participant_id": lens_participant_id,
+
+            "capture_started_at": now,
+
+            # Hora exacta en que el especialista presionó «Finalizar
+            # experiencia». Es el límite temporal de la captura y NO se
+            # modifica durante los reintentos.
+            "capture_ended_at": None,
+
+            # Momento en que se confirmó que la transferencia de archivos
+            # terminó (habilita la extracción sin perder JSON tardíos).
+            "data_ready_at": None,
+
+            "finalize_requested_at": None,
+
+            "capture_finished_at": None,
+
+            CAPTURE_LENS_SESSION_ATTR: None,
+
+            "lens_session_ids": [],
+
+            "display_codes": [],
+
+            "unity_session_ids": [],
+
+            "record_count": 0,
+
+            "pk_type": PK_TYPE_SESSION,
+
+            "created_at": now,
+
+            "updated_at": now,
+        }
+
+        created = self.dynamo.put_item(
+
+            self.table,
+
+            data,
+
+            condition_expression=Attr("session_id").not_exists(),
+        )
+
+        if created:
+
+            invalidate_sessions_cache()
+
+            return {
+                "created": True,
+                "session": self._materialize_raw_json(data) or data,
+            }
+
+        existing = self.get_session(session_id)
+
+        return {
+            "created": False,
+            "session": existing or data,
+        }
+
+    def get_capture_by_lens_session(
+        self,
+        lens_session_id: Optional[str],
+    ) -> Optional[dict]:
+        """Localiza la experiencia de EmotionLab vinculada a la captura
+        original del lente mediante `gsi-sessions-lens-session`.
+
+        Permite centralizar registros posteriores sin volver a resolver el
+        PIN y sin fusionar experiencias independientes que compartan un PIN.
+        """
+
+        if not lens_session_id:
+
+            return None
+
+        try:
+
+            matches = self.dynamo.query_all(
+
+                self.table,
+
+                Key(CAPTURE_LENS_SESSION_ATTR).eq(
+                    str(lens_session_id)
+                ),
+
+                index_name=CAPTURE_LENS_SESSION_GSI,
+
+                max_items=1,
+            )
+
+        except Exception as error:
+
+            print(
+                "Error buscando captura por sesión del lente "
+                f"(tipo={type(error).__name__})"
+            )
+
+            return None
+
+        if not matches:
+
+            return None
+
+        return self._materialize_raw_json(matches[0])
+
+    def bind_capture_lens_session(
+        self,
+        session_id: str,
+        lens_session_id: Optional[str],
+        display_code: Optional[str] = None,
+    ) -> Optional[str]:
+        """Vincula la identidad original del lente a la experiencia.
+
+        El primer `lens_session_id` se guarda además como atributo
+        indexado (uno por experiencia). La lista completa se conserva en
+        `lens_session_ids`. Devuelve el `lens_session_id` indexado.
+        """
+
+        key = self._resolve_session_key(session_id)
+
+        if not key:
+
+            raise SessionNotFound("La sesion no existe")
+
+        session = self.get_session(session_id) or {}
+
+        lens_ids = list(session.get("lens_session_ids") or [])
+
+        display_codes = list(session.get("display_codes") or [])
+
+        primary = session.get(CAPTURE_LENS_SESSION_ATTR)
+
+        if lens_session_id and lens_session_id not in lens_ids:
+
+            lens_ids.append(lens_session_id)
+
+        if display_code and display_code not in display_codes:
+
+            display_codes.append(display_code)
+
+        new_primary = primary or lens_session_id
+
+        self.dynamo.update_item(
+
+            self.table,
+
+            key=key,
+
+            update_data={
+
+                CAPTURE_LENS_SESSION_ATTR: new_primary,
+
+                "lens_session_ids": lens_ids,
+
+                "display_codes": display_codes,
+
+                "updated_at": DynamoDBService.now_iso(),
+            },
+        )
+
+        invalidate_sessions_cache()
+
+        return new_primary
+
+    def transition_capture_status(
+        self,
+        session_id: str,
+        new_status: str,
+        *,
+        allowed_from: str,
+    ) -> bool:
+        """Transición de estado atómica de una experiencia de captura.
+
+        Solo aplica si el estado actual es `allowed_from` (escritura
+        condicional). Devuelve True si la transición se realizó y False si
+        el estado ya había cambiado (por ejemplo, cierre concurrente).
+        """
+
+        self._validate_status(new_status)
+
+        key = self._resolve_session_key(session_id)
+
+        if not key:
+
+            raise SessionNotFound("La sesion no existe")
+
+        now = DynamoDBService.now_iso()
+
+        updates: dict[str, Any] = {
+
+            "status": new_status,
+
+            "estado": new_status,
+
+            "updated_at": now,
+        }
+
+        if new_status == STATUS_FINALIZING:
+
+            updates["finalize_requested_at"] = now
+
+            # Límite temporal de la captura: se fija una sola vez, cuando
+            # la experiencia pasa a `finalizing`. La escritura condicional
+            # (`status == allowed_from`) impide sobrescribirlo en un
+            # reintento.
+            updates["capture_ended_at"] = now
+
+        if new_status == STATUS_CAPTURED:
+
+            updates["capture_finished_at"] = now
+
+        changed = self.dynamo.update_item(
+
+            self.table,
+
+            key=key,
+
+            update_data=updates,
+
+            condition_expression=(
+                "attribute_exists(#cap_status) "
+                "AND #cap_status = :cap_expected"
+            ),
+
+            expression_attribute_names={
+                "#cap_status": "status",
+            },
+
+            expression_attribute_values={
+                ":cap_expected": allowed_from,
+            },
+        )
+
+        if changed:
+
+            invalidate_sessions_cache()
+
+        return bool(changed)
+
+    # ======================================================
+    # SLOT DE CAPTURA (UNA EXPERIENCIA ACTIVA GLOBAL)
+    # ======================================================
+
+    @staticmethod
+    def _capture_lock_sk() -> str:
+        """Clave del cerrojo global de captura.
+
+        MVP: solo puede existir UNA experiencia activa en todo el sistema,
+        con independencia del propietario o del dispositivo. La clave es
+        constante, de modo que la escritura condicional
+        (`attribute_not_exists(sk)`) impide atómicamente que dos inicios
+        simultáneos ganen a la vez.
+        """
+
+        return CAPTURE_LOCK_SK
+
+    def acquire_capture_slot(
+        self,
+        session_id: str,
+        owner_id: Optional[str] = None,
+        capture_token: Optional[str] = None,
+    ) -> bool:
+        """Reserva atómicamente el cerrojo global de captura.
+
+        Devuelve True si quedó reservado y False si ya había una experiencia
+        activa. El `owner_id` se conserva solo como metadato de trazabilidad;
+        no forma parte de la clave y por tanto no habilita experiencias
+        concurrentes de distintos especialistas. El `capture_token` asocia el
+        cerrojo al intento de inicio (registro del intento por `request_token`).
+        """
+
+        now = DynamoDBService.now_iso()
+
+        lock_item = {
+            "participant_id": PENDING_PARTICIPANT_ID,
+            "sk": self._capture_lock_sk(),
+            "pk_type": PK_TYPE_CAPTURE_LOCK,
+            # Se evita a propósito el atributo `session_id`: así esta fila
+            # técnica nunca entra en los índices de importación ni en los
+            # listados de sesiones.
+            "active_session_id": session_id,
+            "confirmation_state": CAPTURE_CONFIRMATION_IN_PROGRESS,
+            "created_at": now,
+            "updated_at": now,
+        }
+
+        normalized_owner = owner_id.strip() if isinstance(owner_id, str) else ""
+
+        if normalized_owner:
+
+            lock_item["owner_id"] = normalized_owner
+
+        if isinstance(capture_token, str) and capture_token.strip():
+
+            lock_item["capture_token"] = capture_token.strip()
+
+        acquired = self.dynamo.put_item(
+
+            self.table,
+
+            lock_item,
+
+            condition_expression="attribute_not_exists(#sk)",
+
+            expression_attribute_names={
+                "#sk": "sk",
+            },
+        )
+
+        if acquired:
+
+            invalidate_sessions_cache()
+
+        return bool(acquired)
+
+    def get_capture_confirmation(self, session_id: str) -> Optional[dict]:
+        """Recupera una confirmación recibida para reanudar persistencia."""
+
+        slot = self.get_capture_slot() or {}
+        if (
+            slot.get("active_session_id") != session_id
+            or slot.get("confirmation_state") != CAPTURE_CONFIRMATION_SUCCEEDED
+        ):
+            return None
+        return {
+            "session_id": slot.get("lens_session_id"),
+            "participant_id": slot.get("lens_participant_id"),
+        }
+
+    def mark_capture_confirmation_succeeded(
+        self,
+        session_id: str,
+        lens_session_id: str,
+        participant_id: Optional[str] = None,
+    ) -> bool:
+        """Persiste la respuesta del lente antes de crear la sesión local."""
+
+        update_data = {
+            "confirmation_state": CAPTURE_CONFIRMATION_SUCCEEDED,
+            "lens_session_id": lens_session_id,
+            "updated_at": DynamoDBService.now_iso(),
+        }
+        if participant_id:
+            update_data["lens_participant_id"] = participant_id
+        changed = self.dynamo.update_item(
+            self.table,
+            key={
+                "participant_id": PENDING_PARTICIPANT_ID,
+                "sk": self._capture_lock_sk(),
+            },
+            update_data=update_data,
+            condition_expression=(
+                "attribute_exists(#active) AND #active = :expected"
+            ),
+            expression_attribute_names={"#active": "active_session_id"},
+            expression_attribute_values={":expected": session_id},
+        )
+        if changed:
+            invalidate_sessions_cache()
+        return bool(changed)
+
+    def get_capture_slot(self) -> Optional[dict]:
+        """Devuelve el cerrojo global de captura, si existe."""
+
+        key = {
+            "participant_id": PENDING_PARTICIPANT_ID,
+            "sk": self._capture_lock_sk(),
+        }
+
+        return self.dynamo.get_item(self.table, key)
+
+    def release_capture_slot(
+        self,
+        session_id: str,
+        *,
+        owner_id: Optional[str] = None,
+    ) -> bool:
+        """Libera el cerrojo global SOLO si pertenece a `session_id`.
+
+        El borrado es condicional (`active_session_id = :expected`): si otra
+        experiencia reemplazó el cerrojo entre la lectura y el borrado, esta
+        operación no elimina ni altera el cerrojo ajeno y devuelve False. Es
+        idempotente: liberar un cerrojo inexistente no produce error.
+        """
+
+        if not isinstance(session_id, str) or not session_id.strip():
+
+            return False
+
+        names = {"#active": "active_session_id"}
+        values = {":expected": session_id}
+        condition = "attribute_exists(#active) AND #active = :expected"
+        if isinstance(owner_id, str) and owner_id.strip():
+            condition += " AND #owner = :owner"
+            names["#owner"] = "owner_id"
+            values[":owner"] = owner_id.strip()
+
+        released = self.dynamo.delete_item(
+
+            self.table,
+
+            {
+                "participant_id": PENDING_PARTICIPANT_ID,
+                "sk": self._capture_lock_sk(),
+            },
+
+            condition_expression=condition,
+            expression_attribute_names=names,
+            expression_attribute_values=values,
+        )
+
+        if released:
+
+            invalidate_sessions_cache()
+
+        return bool(released)
+
+    def has_open_capture_experiences(self) -> bool:
+        """Fail closed if any persisted capture is not in its terminal state."""
+        open_statuses = {
+            STATUS_CAPTURING,
+            STATUS_FINALIZING,
+            STATUS_IMPORTING,
+            STATUS_CAPTURE_IMPORT_ERROR,
+        }
+        # This scan is only used when an orphaned lock has no session ID. Do
+        # not use the cached list_sessions() result: failure to verify must
+        # prevent lock recovery, never be treated as an empty table.
+        sessions = self.dynamo.scan_all(self.table)
+        return any(
+            item.get("pk_type") == PK_TYPE_SESSION
+            and (item.get("status") or item.get("estado")) in open_statuses
+            for item in sessions
+        )
+
+    def release_empty_capture_slot(self, owner_id: str) -> bool:
+        """Conditionally remove an orphan lock only when it has no attempt data.
+
+        The owner guard and absence checks ensure this cannot release a lock
+        for another owner or an in-flight/uncertain remote confirmation.
+        This removes only the technical lock row, never a session row.
+        """
+        if not isinstance(owner_id, str) or not owner_id.strip():
+            return False
+
+        names = {
+            "#kind": "pk_type",
+            "#owner": "owner_id",
+            "#active": "active_session_id",
+            "#state": "confirmation_state",
+            "#token": "capture_token",
+            "#lens": "lens_session_id",
+            "#lens_participant": "lens_participant_id",
+        }
+        values = {
+            ":kind": PK_TYPE_CAPTURE_LOCK,
+            ":owner": owner_id.strip(),
+        }
+        condition = (
+            "#kind = :kind AND #owner = :owner "
+            "AND attribute_not_exists(#active) "
+            "AND attribute_not_exists(#state) "
+            "AND attribute_not_exists(#token) "
+            "AND attribute_not_exists(#lens) "
+            "AND attribute_not_exists(#lens_participant)"
+        )
+        released = self.dynamo.delete_item(
+            self.table,
+            {
+                "participant_id": PENDING_PARTICIPANT_ID,
+                "sk": self._capture_lock_sk(),
+            },
+            condition_expression=condition,
+            expression_attribute_names=names,
+            expression_attribute_values=values,
+        )
+        if released:
+            invalidate_sessions_cache()
+        return bool(released)
+
+    def mark_capture_confirmation_unknown(self, session_id: str) -> bool:
+        """Marca el cerrojo como «confirmación indeterminada».
+
+        Se usa tras un timeout ambiguo al confirmar el PIN: la petición pudo
+        haberse aplicado en el lente. La escritura es condicional
+        (`active_session_id = :expected`), de modo que nunca altera un cerrojo
+        ajeno. Devuelve True si se pudo marcar.
+        """
+
+        if not isinstance(session_id, str) or not session_id.strip():
+
+            return False
+
+        changed = self.dynamo.update_item(
+
+            self.table,
+
+            key={
+                "participant_id": PENDING_PARTICIPANT_ID,
+                "sk": self._capture_lock_sk(),
+            },
+
+            update_data={
+                "confirmation_state": CAPTURE_CONFIRMATION_UNKNOWN,
+                "updated_at": DynamoDBService.now_iso(),
+            },
+
+            condition_expression=(
+                "attribute_exists(#active) AND #active = :expected"
+            ),
+
+            expression_attribute_names={
+                "#active": "active_session_id",
+            },
+
+            expression_attribute_values={
+                ":expected": session_id,
+            },
+        )
+
+        if changed:
+
+            invalidate_sessions_cache()
+
+        return bool(changed)

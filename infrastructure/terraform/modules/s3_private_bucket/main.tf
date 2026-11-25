@@ -1,79 +1,63 @@
 variable "bucket_name" {
-  description = "Nombre del bucket S3 (debe existir previamente en AWS Learner Lab)"
-  type        = string
-}
-
-variable "env" {
-  description = "Entorno (dev/prod)"
-  type        = string
+  type = string
 }
 
 variable "project" {
-  description = "Nombre del proyecto"
-  type        = string
+  type = string
+}
+
+variable "env" {
+  type = string
+}
+
+variable "force_destroy" {
+  type    = bool
+  default = false
 }
 
 variable "versioning_enabled" {
-  description = "Habilitar versionado de objetos (prod=true, dev=false recomendado). Se ignora en Learner Lab; gestionar via scripts/setup_s3_configs.py."
-  type        = bool
-  default     = false
+  type    = bool
+  default = true
 }
 
-variable "tags" {
-  description = "Tags adicionales (solo metadata; no aplicados via Terraform en Learner Lab)"
-  type        = map(string)
-  default     = {}
+variable "kms_key_arn" {
+  type    = string
+  default = ""
 }
 
-# ============================================================
-# AWS LEARNER LAB SCP WORKAROUND
-# ============================================================
-# El SCP del Learner Lab aplica DENY EXPLÍCITO a s3:GetObjectLockConfiguration.
-# El provider hashicorp/aws 5.x LLAMA AUTOMATICAMENTE a GetObjectLockConfiguration
-# para TODOS los recursos hijos de configuración S3:
-#   aws_s3_bucket / aws_s3_bucket_server_side_encryption_configuration /
-#   aws_s3_bucket_policy / aws_s3_bucket_public_access_block /
-#   aws_s3_bucket_ownership_controls / aws_s3_bucket_versioning
-#
-# Solución compatible con Learner Lab SIN modificar SCP:
-#   · Terraform solo usa data "aws_s3_bucket" (SOLO LECTURA via HeadBucket).
-#     HeadBucket NO lee Object Lock → no es bloqueado.
-#   · Las 5 configuraciones de seguridad S3 (Encryption, PublicAccessBlock,
-#     Policy HTTPS-only, OwnershipControls, Versioning) se aplican mediante el
-#     script idempotente scripts/setup_s3_configs.py que ejecuta directamente:
-#       PutBucketEncryption + PutPublicAccessBlock + PutBucketPolicy +
-#       PutBucketOwnershipControls + PutBucketVersioning
-#     Estas 5 APIs de escritura NO consultan Object Lock y pasan OK el SCP.
-#
-# REQUISITO PREVIO (ya debe estar ejecutado):
-#   terraform state rm module.s3_report_pdfs.aws_s3_bucket.private
-#   terraform state rm module.s3_sessions_raw.aws_s3_bucket.private
-#   (solo modifica .tfstate local → NO destruye los buckets en AWS).
-#
-# VERIFICACIÓN:
-#   python scripts/setup_s3_configs.py           # aplicar configuraciones
-#   python scripts/setup_s3_configs.py --verify  # verificar aplicadas
-# ============================================================
-data "aws_s3_bucket" "private" {
-  bucket = var.bucket_name
+resource "aws_s3_bucket" "this" {
+  bucket        = var.bucket_name
+  force_destroy = var.force_destroy
+  tags          = { Project = var.project, Environment = var.env, ManagedBy = "Terraform" }
+}
+
+resource "aws_s3_bucket_public_access_block" "this" {
+  bucket                  = aws_s3_bucket.this.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "this" {
+  bucket = aws_s3_bucket.this.id
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm     = var.kms_key_arn == "" ? "AES256" : "aws:kms"
+      kms_master_key_id = var.kms_key_arn != "" ? var.kms_key_arn : null
+    }
+  }
+}
+
+resource "aws_s3_bucket_versioning" "this" {
+  bucket = aws_s3_bucket.this.id
+  versioning_configuration { status = var.versioning_enabled ? "Enabled" : "Suspended" }
 }
 
 output "bucket_name" {
-  description = "Nombre del bucket S3"
-  value       = data.aws_s3_bucket.private.id
+  value = var.bucket_name
 }
 
 output "bucket_arn" {
-  description = "ARN del bucket S3"
-  value       = data.aws_s3_bucket.private.arn
-}
-
-output "bucket_domain_name" {
-  description = "Dominio regional del bucket"
-  value       = data.aws_s3_bucket.private.bucket_regional_domain_name
-}
-
-output "bucket_region" {
-  description = "Region del bucket"
-  value       = data.aws_s3_bucket.private.region
+  value = aws_s3_bucket.this.arn
 }

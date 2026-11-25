@@ -1,0 +1,10 @@
+﻿{
+  "edad": 21,
+  "hora": 10,
+  "dia_semana": 1,
+  "tiempo_total_vr": 300,
+  "intentos": 1,
+  "difficulty_level": "medium",
+  "escena": "presentacion",
+  "genero": "F"
+}

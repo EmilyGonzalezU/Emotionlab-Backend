@@ -13,22 +13,6 @@ variable "project" {
   type        = string
 }
 
-variable "email_sender_address" {
-  description = "Direccion de correo remitente SES"
-  type        = string
-}
-
-variable "email_sender_name" {
-  description = "Nombre visible del remitente"
-  type        = string
-}
-
-variable "ses_source_arn" {
-  description = "ARN de identidad SES verificado (opcional)"
-  type        = string
-  default     = ""
-}
-
 resource "aws_cognito_user_pool" "main" {
   name = "${var.name_prefix}-users"
 
@@ -246,7 +230,6 @@ resource "aws_cognito_user_pool" "main" {
     # InvalidParameterException: "From email address is not supported
     # for the COGNITO_DEFAULT email configuration"). Por ello se
     # omiten en este modo; el backend Python (SESService) en cambio
-    # sí enviará con el from_address=em.gonzalezu@duocuc.cl una vez
     # la identidad SES se verifique manualmente desde la consola.
     # ============================================================
     email_sending_account = "COGNITO_DEFAULT"
@@ -289,7 +272,6 @@ resource "aws_cognito_user_pool_client" "flask_backend" {
   # App Client.
   #
   # Motivo (limitación AWS Cognito + hashicorp/aws provider bug):
-  #   El user pool existente (us-east-1_a6JGvOsY9) tiene los atributos
   #   custom declarados con DOBLE prefijo "custom:custom:rol" y
   #   "custom:custom:legacy_uid" (provocó que al mandar CUALQUIER valor
   #   en write_attributes — incluso ["name"] — AWS rechazara con

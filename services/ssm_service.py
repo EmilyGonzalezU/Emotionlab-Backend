@@ -88,7 +88,7 @@ class SSMConfigService:
         except self._ssm.exceptions.ParameterNotFound:
             return None
         except Exception as err:
-            print(f"[SSM] Error leyendo parametro {full_name}: {err}", flush=True)
+            print(f"[SSM] Error leyendo parámetro (tipo={type(err).__name__})", flush=True)
             return None
 
     # ------------------------------------------------------------------
@@ -107,7 +107,7 @@ class SSMConfigService:
         try:
             response = self._secrets.get_secret_value(SecretId=secret_id)
         except Exception as err:
-            print(f"[SecretsManager] Error leyendo {secret_id}: {err}", flush=True)
+            print(f"[SecretsManager] Error leyendo secreto (tipo={type(err).__name__})", flush=True)
             return None
 
         raw = response.get("SecretString")
@@ -177,6 +177,34 @@ class SSMConfigService:
         if from_secret:
             return str(from_secret)
         raise RuntimeError("FERNET_KEY no esta configurado en entorno ni Secrets Manager")
+
+    def get_session_code_hmac_secret(self) -> str:
+        """
+        Obtiene la clave HMAC usada para anonimizar el origen de las
+        validaciones del código de sesión.
+        Prioriza .env y luego AWS Secrets Manager.
+        """
+        local = os.getenv("SESSION_CODE_HMAC_SECRET")
+
+        if local:
+            secret = local
+        else:
+            secret_id = os.getenv("SESSION_CODE_HMAC_SECRET_ID")
+
+            if not secret_id:
+                raise RuntimeError(
+                    "SESSION_CODE_HMAC_SECRET_ID no está configurado."
+                )
+
+            secret = self.get_secret(secret_id)
+
+        if not isinstance(secret, str) or len(secret) < 32:
+            raise RuntimeError(
+                "La clave HMAC del código de sesión no está "
+                "configurada o no cumple la longitud mínima."
+            )
+
+        return secret
 
 
 # Alias para compatibilidad con nombres usados en el DI factory app.py.

@@ -3,7 +3,6 @@
 # ============================================================
 dist/
 build/
-docs/
 node_modules/
 *.exe
 __pycache__/
@@ -18,6 +17,9 @@ htmlcov/
 # Entornos virtuales y paquetes locales
 # ============================================================
 .venv/
+.venv-v2/
+.venv-v8/
+.local-services/
 env/
 venv/
 ENV/
@@ -27,7 +29,6 @@ lib64/
 .eggs/
 lambda-model-test/
 lambda-model-test.zip
-lambda-sync.zip
 
 # ============================================================
 # Credenciales — NUNCA INCLUIR EN GIT
@@ -94,8 +95,6 @@ logs/
 Thumbs.db
 *.bak
 lambda-model-test.zip
-lambda-sync.zip 
-tests/
 aws_test/
 EmotionLabBackend.spec
 lambda-sync/
@@ -107,4 +106,26 @@ __pycache__/
 *.tfstate
 *.tfstate.*
 *.tfplan
+tfplan-*
 tfplan
+
+# ============================================================
+# Artefactos locales de despliegue
+# ============================================================
+infrastructure/terraform/environments/dev/terraform.tfvars
+infrastructure/terraform/environments/*/terraform.tfvars
+infrastructure/terraform/environments/*/*.tfplan
+model_image.json
+model_manifest.json
+backend_url.txt
+sync_url.txt
+test_url.txt
+
+# Artefactos generados o con datos/modelos empaquetados
+infrastructure/terraform/packages/*.zip
+infrastructure/terraform/modules/lambda/*.zip
+ia/*.pkl
+
+# Estado local de la prueba funcional de lentes (test_captura.py)
+.emotionlab_captura_state.json
+

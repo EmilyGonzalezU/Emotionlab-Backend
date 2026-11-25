@@ -83,6 +83,16 @@ _ENV_PATH = _cargar_env()
 JWT_SECRET = os.getenv("JWT_SECRET")
 
 
+if not JWT_SECRET and os.getenv("JWT_SECRET_ID"):
+    import boto3
+
+    secret_response = boto3.client(
+        "secretsmanager",
+        region_name=os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", "us-east-1")),
+    ).get_secret_value(SecretId=os.environ["JWT_SECRET_ID"])
+    JWT_SECRET = secret_response.get("SecretString")
+
+
 if not JWT_SECRET:
     raise RuntimeError(
         "No se encontró JWT_SECRET. "
